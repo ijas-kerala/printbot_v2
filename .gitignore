@@ -1,0 +1,35 @@
+# Secrets
+.env
+
+# Runtime data
+uploads/
+logs/
+printbot.db
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Alembic migrations (auto-generated; commit manually when ready)
+alembic/versions/*.py
+!alembic/versions/0001_initial_schema.py
+
+# Virtual environments
+venv/
+.venv/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp

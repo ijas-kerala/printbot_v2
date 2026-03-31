@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#E8820C">
+  <title>{% block title %}PrintBot{% endblock %}</title>
+
+  <!-- Tailwind CDN (utilities only — custom design via app.css variables) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- PrintBot design system: custom components, layout helpers -->
+  <link rel="stylesheet" href="/static/css/app.css">
+
+  <!-- Google Fonts: Syne (headings) + DM Sans (body) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap" rel="stylesheet">
+
+  <!-- Tailwind theme extension: wire up CSS variables as Tailwind colours -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            head: ['Syne', 'sans-serif'],
+            body: ['DM Sans', 'sans-serif'],
+          },
+          colors: {
+            ink:        '#1A1A2E',
+            paper:      '#F5F0EB',
+            cream:      '#EDE8E1',
+            saffron:    '#E8820C',
+            'saffron-light': '#FDF0E0',
+            coral:      '#D94F3D',
+            forest:     '#2D6A4F',
+            mist:       '#6B7280',
+            border:     '#D5CEC5',
+          },
+          borderRadius: {
+            sm: '6px',
+            md: '12px',
+            lg: '20px',
+            xl: '28px',
+          },
+          boxShadow: {
+            sm:  '0 1px 3px rgba(26,26,46,0.08)',
+            md:  '0 4px 12px rgba(26,26,46,0.10)',
+            lg:  '0 8px 24px rgba(26,26,46,0.12)',
+          },
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* ── CSS Design Tokens ──────────────────────────────────────────────────── */
+    :root {
+      --ink:           #1A1A2E;
+      --paper:         #F5F0EB;
+      --cream:         #EDE8E1;
+      --saffron:       #E8820C;
+      --saffron-light: #FDF0E0;
+      --coral:         #D94F3D;
+      --forest:        #2D6A4F;
+      --mist:          #6B7280;
+      --border:        #D5CEC5;
+
+      --font-head: 'Syne', sans-serif;
+      --font-body: 'DM Sans', sans-serif;
+
+      --radius-sm: 6px;
+      --radius-md: 12px;
+      --radius-lg: 20px;
+      --radius-xl: 28px;
+
+      --shadow-sm: 0 1px 3px rgba(26,26,46,0.08);
+      --shadow-md: 0 4px 12px rgba(26,26,46,0.10);
+      --shadow-lg: 0 8px 24px rgba(26,26,46,0.12);
+    }
+
+    /* ── Base reset ─────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html { -webkit-tap-highlight-color: transparent; }
+
+    body {
+      font-family: var(--font-body);
+      background-color: var(--paper);
+      color: var(--ink);
+      min-height: 100dvh;
+      min-height: 100vh;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      font-family: var(--font-head);
+    }
+
+    /* ── Scrollbar ──────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--mist); }
+
+    /* ── Toast notifications ────────────────────────────────────────────────── */
+    #toast-container {
+      position: fixed;
+      bottom: 1.5rem;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9999;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 0.5rem;
+      pointer-events: none;
+      width: min(calc(100vw - 2rem), 420px);
+    }
+
+    .toast {
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius-md);
+      font-family: var(--font-body);
+      font-size: 0.875rem;
+      font-weight: 500;
+      box-shadow: var(--shadow-md);
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      animation: toast-in 0.25s ease;
+    }
+    .toast-info    { background: var(--ink);    color: var(--paper); }
+    .toast-success { background: var(--forest); color: #fff; }
+    .toast-error   { background: var(--coral);  color: #fff; }
+    .toast-warning { background: var(--saffron); color: #fff; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Kiosk mode overrides ───────────────────────────────────────────────── */
+    .kiosk-mode {
+      --paper: #0F0F1A;
+      --ink:   #F5F0EB;
+    }
+  </style>
+
+  {% block head_extra %}{% endblock %}
+</head>
+
+<body class="flex flex-col min-h-screen">
+
+  {% block body_start %}{% endblock %}
+
+  <!-- Main content region -->
+  <main class="flex-1 w-full max-w-lg mx-auto flex flex-col justify-center px-4 py-6">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Footer -->
+  <footer class="text-center py-4 text-xs" style="color: var(--mist);">
+    <p style="font-family: var(--font-body);">PrintBot &mdash; Self-service print</p>
+  </footer>
+
+  <!-- Toast container -->
+  <div id="toast-container" role="status" aria-live="polite"></div>
+
+  <!-- Toast helper: showToast(message, type) available globally -->
+  <script>
+    (function () {
+      const container = document.getElementById('toast-container');
+
+      window.showToast = function (message, type) {
+        type = type || 'info';
+        const el = document.createElement('div');
+        el.className = 'toast toast-' + type;
+        // Use textContent — never innerHTML for user messages
+        el.textContent = message;
+        container.appendChild(el);
+        setTimeout(function () {
+          el.style.transition = 'opacity 0.3s';
+          el.style.opacity = '0';
+          setTimeout(function () { el.remove(); }, 320);
+        }, 3000);
+      };
+    }());
+  </script>
+
+  {% block scripts %}{% endblock %}
+
+</body>
+</html>

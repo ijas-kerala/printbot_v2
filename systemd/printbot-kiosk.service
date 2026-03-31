@@ -1,0 +1,28 @@
+[Unit]
+Description=PrintBot v3 Kiosk (Chromium)
+After=graphical.target printbot-backend.service
+Requires=printbot-backend.service
+Wants=graphical.target
+
+[Service]
+User=ijas
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/ijas/.Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/chromium-browser \
+  --kiosk \
+  --noerrdialogs \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --disable-translate \
+  --no-first-run \
+  --check-for-update-interval=31536000 \
+  --app=http://localhost:8000/kiosk
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=PrintBot v3 Backend
+After=network.target cups.service
+Wants=cups.service
+
+[Service]
+User=ijas
+WorkingDirectory=/home/ijas/printbot
+EnvironmentFile=/home/ijas/printbot/.env
+ExecStart=/home/ijas/printbot/venv/bin/uvicorn web.main:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers 1 \
+  --loop asyncio \
+  --log-level warning \
+  --access-log
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

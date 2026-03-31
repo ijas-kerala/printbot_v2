@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+
+{% block title %}Pay ₹{{ amount }} — PrintBot{% endblock %}
+
+{% block head_extra %}
+  {# Razorpay checkout JS — loaded early so it's ready before the page paint #}
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+  <style>
+    /* ── Payment page ─────────────────────────────────────────────────────── */
+
+    .pay-card {
+      background: #fff;
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
+    }
+
+    /* Amount header band */
+    .pay-amount-band {
+      background: var(--ink);
+      padding: 2rem 1.5rem 1.75rem;
+      text-align: center;
+    }
+    .pay-amount-label {
+      font-family: var(--font-body);
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(245,240,235,0.6);
+      margin-bottom: 0.25rem;
+    }
+    .pay-amount-value {
+      font-family: var(--font-head);
+      font-size: 3.5rem;
+      font-weight: 800;
+      color: var(--saffron);
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+
+    /* Body */
+    .pay-body {
+      padding: 2rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.25rem;
+    }
+
+    .pay-icon-wrap {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: var(--saffron-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .pay-icon-wrap svg {
+      width: 32px;
+      height: 32px;
+      color: var(--saffron);
+    }
+
+    .pay-title {
+      font-family: var(--font-head);
+      font-size: 1.375rem;
+      font-weight: 700;
+      color: var(--ink);
+      text-align: center;
+      margin: 0;
+    }
+    .pay-subtitle {
+      font-size: 0.9rem;
+      color: var(--mist);
+      text-align: center;
+      margin: 0;
+    }
+
+    /* CTA button */
+    .pay-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 1rem 1.5rem;
+      background: var(--saffron);
+      color: #fff;
+      font-family: var(--font-head);
+      font-size: 1.1rem;
+      font-weight: 700;
+      border: none;
+      border-radius: var(--radius-lg);
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      box-shadow: 0 4px 14px rgba(232,130,12,0.35);
+    }
+    .pay-btn:hover  { background: #cf7009; }
+    .pay-btn:active { transform: scale(0.98); }
+    .pay-btn:disabled {
+      background: var(--border);
+      color: var(--mist);
+      cursor: default;
+      box-shadow: none;
+      transform: none;
+    }
+
+    /* Status message row */
+    .pay-status {
+      font-size: 0.875rem;
+      color: var(--mist);
+      text-align: center;
+      min-height: 1.25rem;
+    }
+    .pay-status.is-error   { color: var(--coral); }
+    .pay-status.is-success { color: var(--forest); }
+
+    /* Loading spinner (inline SVG) */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+
+    /* Mock mode banner */
+    .mock-banner {
+      background: #FFF7E6;
+      border: 1px solid #FFD899;
+      border-radius: var(--radius-md);
+      padding: 0.6rem 0.875rem;
+      font-size: 0.8rem;
+      color: #7A4800;
+      text-align: center;
+      width: 100%;
+    }
+
+    /* Security note */
+    .pay-secure {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.375rem;
+      font-size: 0.75rem;
+      color: var(--mist);
+    }
+    .pay-secure svg { width: 12px; height: 12px; }
+  </style>
+{% endblock %}
+
+{% block content %}
+<div style="width:100%; display:flex; flex-direction:column; gap:1.5rem;">
+
+  {# Dev/staging banner #}
+  {% if is_mock_payment %}
+  <div class="mock-banner">
+    <strong>Test mode</strong> — No real payment will be charged. Use Razorpay test card 4111 1111 1111 1111.
+  </div>
+  {% endif %}
+
+  <!-- Payment card -->
+  <div class="pay-card">
+
+    <!-- Amount band -->
+    <div class="pay-amount-band">
+      <p class="pay-amount-label">Total Amount</p>
+      <p class="pay-amount-value">₹{{ "%.2f"|format(amount) }}</p>
+    </div>
+
+    <!-- Body -->
+    <div class="pay-body">
+
+      <!-- Icon -->
+      <div class="pay-icon-wrap" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="5" width="20" height="14" rx="2"/>
+          <path d="M2 10h20"/>
+        </svg>
+      </div>
+
+      <div style="text-align:center;">
+        <h1 class="pay-title">Complete your payment</h1>
+        <p class="pay-subtitle">Secure UPI / card payment via Razorpay</p>
+      </div>
+
+      <!-- CTA -->
+      <button
+        id="pay-btn"
+        class="pay-btn"
+        type="button"
+        aria-label="Open payment modal"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        Pay Now
+      </button>
+
+      <!-- Status message (updated by JS) -->
+      <p class="pay-status" id="pay-status" aria-live="polite"></p>
+
+      <!-- Secure note -->
+      <p class="pay-secure">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        Secured by Razorpay
+      </p>
+
+    </div>
+  </div>
+
+  <!-- Back to settings (available before payment) -->
+  <p style="text-align:center; font-size:0.8rem; color: var(--mist);">
+    Changed your mind? <a href="/settings?job_id={{ job_id }}" style="color:var(--saffron); text-decoration:none; font-weight:500;">Go back to settings</a>
+  </p>
+
+</div>
+
+{# Embed payment data for payment.js — no inline JS accessing secrets directly #}
+<script id="payment-data" type="application/json">
+{
+  "key_id":      {{ key_id | tojson }},
+  "order_id":    {{ order_id | tojson }},
+  "amount_paise": {{ amount_paise }},
+  "job_id":      {{ job_id | tojson }},
+  "shop_name":   {{ shop_name | tojson }},
+  "is_mock":     {{ "true" if is_mock_payment else "false" }}
+}
+</script>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/js/payment.js"></script>
+{% endblock %}

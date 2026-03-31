@@ -1,0 +1,571 @@
+{% extends "base.html" %}
+{#
+  web/templates/admin/login.html
+  Admin authentication: 3×3 pattern lock (Z-shape = 1-2-3-5-7-8-9) + PIN fallback.
+  POST /admin/login with { pin, pattern_sequence }
+
+  Jinja2 context:
+    error (str|None) — auth failure message
+    lockout_until (str|None) — ISO timestamp if locked out
+#}
+
+{% block title %}Admin Login — PrintBot{% endblock %}
+
+{% block head_extra %}
+<style>
+  body > main {
+    max-width: 400px;
+    justify-content: center;
+  }
+
+  /* ── Login card ──────────────────────────────────────────────────────────── */
+  .login-card {
+    background: #fff;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+  }
+
+  .login-header {
+    background: var(--ink);
+    padding: 1.75rem 1.5rem 1.5rem;
+    text-align: center;
+  }
+  .login-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(232,130,12,0.15);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 0.875rem;
+    color: var(--saffron);
+  }
+  .login-title {
+    font-family: var(--font-head);
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: #F5F0EB;
+    margin: 0 0 0.25rem;
+    letter-spacing: -0.02em;
+  }
+  .login-subtitle {
+    font-size: 0.8125rem;
+    color: rgba(245,240,235,0.55);
+    margin: 0;
+  }
+
+  .login-body {
+    padding: 1.75rem 1.5rem;
+  }
+
+  /* ── Tab switcher ────────────────────────────────────────────────────────── */
+  .auth-tabs {
+    display: flex;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+  .auth-tab {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    text-align: center;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: var(--mist);
+    transition: background 0.15s, color 0.15s;
+    font-family: var(--font-body);
+  }
+  .auth-tab.is-active {
+    background: var(--ink);
+    color: #F5F0EB;
+  }
+
+  /* ── Pattern lock ────────────────────────────────────────────────────────── */
+  #pattern-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.25rem;
+  }
+  #pattern-panel.is-hidden { display: none; }
+
+  .pattern-hint {
+    font-size: 0.8125rem;
+    color: var(--mist);
+    text-align: center;
+    min-height: 1.2em;
+    font-weight: 500;
+  }
+  .pattern-hint.is-error { color: var(--coral); }
+  .pattern-hint.is-info  { color: var(--forest); }
+
+  /* Connection lines drawn on the SVG overlay */
+  #pattern-svg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .pattern-grid-wrap {
+    position: relative;
+    width: 220px;
+    height: 220px;
+  }
+
+  /* ── PIN panel ────────────────────────────────────────────────────────────── */
+  #pin-panel { display: none; }
+  #pin-panel.is-active { display: block; }
+
+  .pin-display {
+    display: flex;
+    gap: 0.625rem;
+    justify-content: center;
+    margin-bottom: 1.25rem;
+  }
+  .pin-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: #fff;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .pin-dot.is-filled { background: var(--ink); border-color: var(--ink); }
+  .pin-dot.is-error  { background: var(--coral); border-color: var(--coral); }
+
+  .pin-keypad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.625rem;
+  }
+  .pin-key {
+    aspect-ratio: 1;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    font-family: var(--font-head);
+    font-size: 1.375rem;
+    font-weight: 700;
+    color: var(--ink);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s, transform 0.1s;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .pin-key:hover  { background: var(--cream); }
+  .pin-key:active { transform: scale(0.92); background: var(--cream); }
+  .pin-key.is-zero { grid-column: 2; }
+  .pin-key.is-delete {
+    font-size: 1rem;
+    color: var(--mist);
+    background: var(--cream);
+  }
+
+  /* Lockout panel */
+  .lockout-notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem;
+    background: #FEF2F2;
+    border: 1px solid #FECACA;
+    border-radius: var(--radius-md);
+    text-align: center;
+  }
+  .lockout-notice-title {
+    font-family: var(--font-head);
+    font-weight: 700;
+    font-size: 0.9375rem;
+    color: var(--coral);
+  }
+  .lockout-notice-timer {
+    font-size: 1.5rem;
+    font-weight: 800;
+    font-family: var(--font-head);
+    color: var(--coral);
+    letter-spacing: 0.04em;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="width:100%;">
+
+  <div class="login-card">
+
+    {# Header #}
+    <div class="login-header">
+      <div class="login-logo" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <h1 class="login-title">Admin Access</h1>
+      <p class="login-subtitle">PrintBot dashboard</p>
+    </div>
+
+    <div class="login-body">
+
+      {% if lockout_until %}
+      {# Lockout state — show countdown, no auth UI #}
+      <div class="lockout-notice">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--coral);" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <p class="lockout-notice-title">Too many failed attempts</p>
+        <div class="lockout-notice-timer" id="lockout-timer" aria-live="polite"></div>
+        <p style="font-size:0.8125rem; color:var(--mist);">Please wait and try again.</p>
+      </div>
+      <script>
+        (function () {
+          var until = new Date({{ lockout_until | tojson }});
+          var el    = document.getElementById('lockout-timer');
+          function tick() {
+            var remaining = Math.ceil((until - Date.now()) / 1000);
+            if (remaining <= 0) { window.location.reload(); return; }
+            var m = Math.floor(remaining / 60);
+            var s = remaining % 60;
+            el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+            setTimeout(tick, 1000);
+          }
+          tick();
+        }());
+      </script>
+
+      {% else %}
+
+      {# Tab switcher #}
+      <div class="auth-tabs" role="tablist" aria-label="Authentication method">
+        <button class="auth-tab is-active" id="tab-pattern" role="tab" aria-selected="true" aria-controls="pattern-panel">
+          Pattern
+        </button>
+        <button class="auth-tab" id="tab-pin" role="tab" aria-selected="false" aria-controls="pin-panel">
+          PIN
+        </button>
+      </div>
+
+      {# Error flash #}
+      {% if error %}
+      <div class="alert alert-error" style="margin-bottom:1rem;" role="alert">
+        <svg class="alert-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <span>{{ error }}</span>
+      </div>
+      {% endif %}
+
+      {# Hidden form — submitted programmatically by JS #}
+      <form id="auth-form" method="POST" action="/admin/login" style="display:none;">
+        <input type="hidden" name="pin"              id="form-pin">
+        <input type="hidden" name="pattern_sequence" id="form-pattern">
+      </form>
+
+      {# ── Pattern panel ──────────────────────────────────────────────────── #}
+      <div id="pattern-panel" role="tabpanel" aria-labelledby="tab-pattern">
+        <p class="pattern-hint" id="pattern-hint">Draw the unlock pattern</p>
+
+        <div class="pattern-grid-wrap" id="pattern-grid-wrap">
+          {# SVG overlay for connection lines #}
+          <svg id="pattern-svg" viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg">
+            <g id="pattern-lines" stroke="rgba(232,130,12,0.5)" stroke-width="3" fill="none" stroke-linecap="round"/>
+          </svg>
+
+          {# 3×3 grid of dots — positions 1-9 left-to-right, top-to-bottom #}
+          <div class="pattern-grid" id="pattern-grid">
+            {% for i in range(1, 10) %}
+            <div class="pattern-dot" data-pos="{{ i }}" role="button"
+                 aria-label="Pattern dot {{ i }}" tabindex="-1"></div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-ghost btn-sm" id="pattern-reset-btn"
+                style="color:var(--mist);">Reset</button>
+      </div>
+
+      {# ── PIN panel ──────────────────────────────────────────────────────── #}
+      <div id="pin-panel" role="tabpanel" aria-labelledby="tab-pin" aria-hidden="true">
+
+        <div class="pin-display" id="pin-display" aria-label="PIN entry" aria-live="polite">
+          <div class="pin-dot" id="pin-d-1"></div>
+          <div class="pin-dot" id="pin-d-2"></div>
+          <div class="pin-dot" id="pin-d-3"></div>
+          <div class="pin-dot" id="pin-d-4"></div>
+        </div>
+
+        <div class="pin-keypad" role="group" aria-label="PIN keypad">
+          {% for n in [1,2,3,4,5,6,7,8,9] %}
+          <button type="button" class="pin-key" data-digit="{{ n }}" aria-label="{{ n }}">{{ n }}</button>
+          {% endfor %}
+          <button type="button" class="pin-key is-zero" data-digit="0" aria-label="0">0</button>
+          <button type="button" class="pin-key is-delete" id="pin-delete-btn" aria-label="Delete">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/>
+              <line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/>
+            </svg>
+          </button>
+        </div>
+
+      </div>
+
+      {% endif %}
+    </div>{# /login-body #}
+  </div>
+
+  <p style="text-align:center; font-size:0.75rem; color:var(--mist); margin-top:1rem;">
+    PrintBot v3 &mdash; Admin Portal
+  </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+
+  // ── Tab switching ─────────────────────────────────────────────────────────────
+  var tabPattern = document.getElementById('tab-pattern');
+  var tabPin     = document.getElementById('tab-pin');
+  var panelPat   = document.getElementById('pattern-panel');
+  var panelPin   = document.getElementById('pin-panel');
+
+  if (!tabPattern) { return; } // Lockout mode — no auth UI
+
+  tabPattern.addEventListener('click', function () {
+    tabPattern.classList.add('is-active');
+    tabPin.classList.remove('is-active');
+    tabPattern.setAttribute('aria-selected', 'true');
+    tabPin.setAttribute('aria-selected', 'false');
+    panelPat.style.display = '';
+    panelPin.style.display = 'none';
+    panelPin.setAttribute('aria-hidden', 'true');
+    panelPat.removeAttribute('aria-hidden');
+  });
+  tabPin.addEventListener('click', function () {
+    tabPin.classList.add('is-active');
+    tabPattern.classList.remove('is-active');
+    tabPin.setAttribute('aria-selected', 'true');
+    tabPattern.setAttribute('aria-selected', 'false');
+    panelPin.style.display = '';
+    panelPat.style.display = 'none';
+    panelPat.setAttribute('aria-hidden', 'true');
+    panelPin.removeAttribute('aria-hidden');
+  });
+
+  // ── Form submission ───────────────────────────────────────────────────────────
+  function submitAuth(pin, pattern) {
+    document.getElementById('form-pin').value     = pin     || '';
+    document.getElementById('form-pattern').value = pattern || '';
+    document.getElementById('auth-form').submit();
+  }
+
+  // ── Pattern lock ──────────────────────────────────────────────────────────────
+
+  var patternSequence  = [];   // Array of position numbers (1-9)
+  var patternHint      = document.getElementById('pattern-hint');
+  var patternGrid      = document.getElementById('pattern-grid');
+  var patternLinesEl   = document.getElementById('pattern-lines');
+  var patternResetBtn  = document.getElementById('pattern-reset-btn');
+
+  // Center coordinates of each dot position (1-9) within 220×220 viewBox
+  // Layout:  1 2 3
+  //          4 5 6
+  //          7 8 9
+  // Each cell is ~73px, with ~37px center offset (first gap ~18px)
+  var DOT_CENTERS = (function () {
+    var map = {};
+    var cols = [37, 110, 183];
+    var rows = [37, 110, 183];
+    var pos  = 1;
+    for (var r = 0; r < 3; r++) {
+      for (var c = 0; c < 3; c++) {
+        map[pos++] = { x: cols[c], y: rows[r] };
+      }
+    }
+    return map;
+  }());
+
+  function getDotEl(pos) {
+    return patternGrid ? patternGrid.querySelector('[data-pos="' + pos + '"]') : null;
+  }
+
+  function resetPattern() {
+    patternSequence = [];
+    patternHint.textContent = 'Draw the unlock pattern';
+    patternHint.className   = 'pattern-hint';
+
+    // Reset dot states
+    for (var p = 1; p <= 9; p++) {
+      var d = getDotEl(p);
+      if (d) { d.className = 'pattern-dot'; }
+    }
+
+    // Clear SVG lines
+    while (patternLinesEl && patternLinesEl.firstChild) {
+      patternLinesEl.removeChild(patternLinesEl.firstChild);
+    }
+  }
+
+  function addDotToPattern(pos) {
+    if (patternSequence.indexOf(pos) !== -1) { return; } // Already in sequence
+
+    // Mark active
+    var d = getDotEl(pos);
+    if (d) {
+      d.classList.add('is-active');
+      setTimeout(function () { d.classList.remove('is-active'); d.classList.add('is-done'); }, 150);
+    }
+
+    // Draw line from previous dot
+    if (patternSequence.length > 0 && patternLinesEl) {
+      var prev = patternSequence[patternSequence.length - 1];
+      var from = DOT_CENTERS[prev];
+      var to   = DOT_CENTERS[pos];
+      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', from.x);
+      line.setAttribute('y1', from.y);
+      line.setAttribute('x2', to.x);
+      line.setAttribute('y2', to.y);
+      patternLinesEl.appendChild(line);
+    }
+
+    patternSequence.push(pos);
+    patternHint.textContent = patternSequence.length + ' dot' + (patternSequence.length > 1 ? 's' : '') + ' selected';
+  }
+
+  function confirmPattern() {
+    if (patternSequence.length < 4) {
+      patternHint.textContent = 'Connect at least 4 dots';
+      patternHint.className   = 'pattern-hint is-error';
+
+      // Shake dots
+      patternSequence.forEach(function (pos) {
+        var d = getDotEl(pos);
+        if (d) { d.classList.add('is-error'); }
+      });
+      setTimeout(resetPattern, 800);
+      return;
+    }
+
+    patternHint.textContent = 'Verifying…';
+    patternHint.className   = 'pattern-hint is-info';
+    submitAuth('', patternSequence.join(''));
+  }
+
+  // Click / touch on dots
+  var isDragging = false;
+
+  if (patternGrid) {
+    patternGrid.addEventListener('mousedown', function (e) {
+      var dot = e.target.closest('.pattern-dot');
+      if (!dot) { return; }
+      isDragging = true;
+      resetPattern();
+      addDotToPattern(parseInt(dot.dataset.pos, 10));
+    });
+
+    patternGrid.addEventListener('mouseover', function (e) {
+      if (!isDragging) { return; }
+      var dot = e.target.closest('.pattern-dot');
+      if (dot) { addDotToPattern(parseInt(dot.dataset.pos, 10)); }
+    });
+
+    document.addEventListener('mouseup', function () {
+      if (!isDragging) { return; }
+      isDragging = false;
+      if (patternSequence.length > 0) { confirmPattern(); }
+    });
+
+    // Touch support for kiosk
+    patternGrid.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      isDragging = true;
+      resetPattern();
+      var touch = e.touches[0];
+      var dot   = document.elementFromPoint(touch.clientX, touch.clientY);
+      if (dot && dot.classList.contains('pattern-dot')) {
+        addDotToPattern(parseInt(dot.dataset.pos, 10));
+      }
+    }, { passive: false });
+
+    patternGrid.addEventListener('touchmove', function (e) {
+      e.preventDefault();
+      if (!isDragging) { return; }
+      var touch = e.touches[0];
+      var el    = document.elementFromPoint(touch.clientX, touch.clientY);
+      if (el && el.classList.contains('pattern-dot')) {
+        addDotToPattern(parseInt(el.dataset.pos, 10));
+      }
+    }, { passive: false });
+
+    patternGrid.addEventListener('touchend', function (e) {
+      e.preventDefault();
+      if (!isDragging) { return; }
+      isDragging = false;
+      if (patternSequence.length > 0) { confirmPattern(); }
+    }, { passive: false });
+  }
+
+  if (patternResetBtn) {
+    patternResetBtn.addEventListener('click', resetPattern);
+  }
+
+  // ── PIN keypad ─────────────────────────────────────────────────────────────────
+
+  var pinValue   = [];
+  var PIN_LENGTH = 4;
+
+  function updatePinDisplay(isError) {
+    for (var i = 1; i <= PIN_LENGTH; i++) {
+      var dot = document.getElementById('pin-d-' + i);
+      if (!dot) { continue; }
+      dot.className = 'pin-dot';
+      if (isError) { dot.classList.add('is-error'); }
+      else if (i <= pinValue.length) { dot.classList.add('is-filled'); }
+    }
+  }
+
+  function handleDigit(digit) {
+    if (pinValue.length >= PIN_LENGTH) { return; }
+    pinValue.push(String(digit));
+    updatePinDisplay(false);
+    if (pinValue.length === PIN_LENGTH) {
+      setTimeout(function () { submitAuth(pinValue.join(''), ''); }, 150);
+    }
+  }
+
+  function handleDelete() {
+    pinValue.pop();
+    updatePinDisplay(false);
+  }
+
+  document.querySelectorAll('.pin-key[data-digit]').forEach(function (btn) {
+    btn.addEventListener('click', function () { handleDigit(btn.dataset.digit); });
+  });
+  var pinDeleteBtn = document.getElementById('pin-delete-btn');
+  if (pinDeleteBtn) {
+    pinDeleteBtn.addEventListener('click', handleDelete);
+  }
+
+  // Keyboard input for PIN panel
+  document.addEventListener('keydown', function (e) {
+    if (panelPin.style.display === 'none') { return; }
+    if (e.key >= '0' && e.key <= '9') { handleDigit(e.key); }
+    if (e.key === 'Backspace') { handleDelete(); }
+  });
+
+}());
+</script>
+{% endblock %}

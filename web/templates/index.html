@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+{#
+  web/templates/index.html
+  Upload page — multi-file drag-and-drop entry point.
+  Accepts PDF, DOCX, JPG, PNG up to 90 MB total.
+  Jinja2 context:  active_job_id (str|None) — existing active job warning.
+#}
+
+{% block title %}PrintBot — Print your documents{% endblock %}
+
+{% block head_extra %}
+<style>
+  /* ── Upload page specific ─────────────────────────────────────────────── */
+
+  body > main {
+    /* Widen the container slightly for this page */
+    max-width: 520px;
+  }
+
+  /* Brand lockup */
+  .brand-lockup {
+    text-align: center;
+    padding: 1rem 0 1.5rem;
+  }
+  .brand-wordmark {
+    font-family: var(--font-head);
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--ink);
+    letter-spacing: -0.04em;
+    line-height: 1;
+    margin: 0 0 0.25rem;
+  }
+  .brand-wordmark span { color: var(--saffron); }
+  .brand-tagline {
+    font-size: 0.875rem;
+    color: var(--mist);
+    margin: 0;
+  }
+
+  /* Drop zone inner layout */
+  .dz-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    pointer-events: none;
+  }
+  .dz-icon-ring {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: var(--saffron-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--saffron);
+    transition: transform 0.2s;
+  }
+  .drop-zone.is-dragging .dz-icon-ring {
+    transform: scale(1.1);
+  }
+  .dz-title {
+    font-family: var(--font-head);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0;
+  }
+  .dz-sub {
+    font-size: 0.8125rem;
+    color: var(--mist);
+    margin: 0;
+  }
+  .dz-browse {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--saffron);
+    border-bottom: 1.5px solid var(--saffron);
+    padding-bottom: 1px;
+    pointer-events: auto;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .dz-browse:hover { color: #cf7009; border-color: #cf7009; }
+
+  /* Accepted file types strip */
+  .accepted-types {
+    display: flex;
+    gap: 0.375rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    pointer-events: none;
+    margin-top: 0.25rem;
+  }
+  .type-chip {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-sm);
+  }
+  .type-chip-pdf  { background: #FEE2E2; color: #991B1B; }
+  .type-chip-docx { background: #DBEAFE; color: #1E3A8A; }
+  .type-chip-img  { background: #D1FAE5; color: #065F46; }
+
+  /* Total size bar section */
+  .size-bar-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .size-bar-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+  .size-used { color: var(--ink); }
+  .size-limit { color: var(--mist); }
+  .size-over  { color: var(--coral); }
+
+  /* File count indicator */
+  .file-count-note {
+    font-size: 0.75rem;
+    color: var(--mist);
+    text-align: right;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex; flex-direction:column; gap:1.25rem; width:100%;">
+
+  {# Brand lockup #}
+  <div class="brand-lockup">
+    <h1 class="brand-wordmark">Print<span>Bot</span></h1>
+    <p class="brand-tagline">Self-service document printing</p>
+  </div>
+
+  {# Active job warning — shown if a previous unfinished job exists #}
+  {% if active_job_id %}
+  <div class="alert alert-info">
+    <svg class="alert-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <div>
+      You have an active print job.
+      <a href="/settings?job_id={{ active_job_id }}" style="font-weight:600; color:var(--saffron); text-decoration:none;">Continue it →</a>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Upload form #}
+  <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data" novalidate>
+
+    {# Drop zone #}
+    <div class="drop-zone" id="drop-zone" role="button" tabindex="0"
+         aria-label="Drag and drop files here, or tap to browse">
+      <div class="dz-inner">
+        <div class="dz-icon-ring" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p class="dz-title">Drop files here</p>
+        <p class="dz-sub">or</p>
+        <span class="dz-browse" id="dz-browse-trigger">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+            <polyline points="13 2 13 9 20 9"/>
+          </svg>
+          Browse files
+        </span>
+        <div class="accepted-types">
+          <span class="type-chip type-chip-pdf">PDF</span>
+          <span class="type-chip type-chip-docx">DOCX</span>
+          <span class="type-chip type-chip-img">JPG</span>
+          <span class="type-chip type-chip-img">PNG</span>
+        </div>
+      </div>
+    </div>
+
+    {# Hidden file input — triggered by browse link and drop zone click #}
+    <input type="file" id="file-input" name="files" multiple accept=".pdf,.docx,.doc,.jpg,.jpeg,.png"
+           style="position:absolute; opacity:0; pointer-events:none; width:1px; height:1px;"
+           aria-hidden="true" tabindex="-1">
+
+    {# File list (hidden until files are added) #}
+    <div id="file-list-section" style="display:none; margin-top:1rem;">
+
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.625rem;">
+        <span style="font-size:0.8125rem; font-weight:700; color:var(--ink);">Selected Files</span>
+        <button type="button" id="clear-all-btn" class="btn btn-ghost btn-sm" style="color:var(--coral);">
+          Clear all
+        </button>
+      </div>
+
+      <div id="file-list" style="display:flex; flex-direction:column; gap:0.5rem;" role="list"
+           aria-label="Files to print"></div>
+
+      {# Total size indicator #}
+      <div class="size-bar-section" style="margin-top:0.875rem;">
+        <div class="size-bar-header">
+          <span id="size-used-label" class="size-used">0 MB</span>
+          <span class="size-limit">90 MB limit</span>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" id="size-bar" style="width:0%"></div>
+        </div>
+        <p id="size-over-msg" class="field-error" style="display:none;">
+          Total size exceeds 90 MB. Remove some files to continue.
+        </p>
+        <p id="file-count-note" class="file-count-note">0 files</p>
+      </div>
+    </div>
+
+    {# Submit button #}
+    <button type="submit" id="submit-btn" class="btn btn-primary btn-lg btn-block"
+            style="margin-top:1.25rem;" disabled aria-disabled="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="9 18 15 12 9 6"/>
+      </svg>
+      Continue to Print Settings
+    </button>
+
+    {# Upload error area #}
+    <div id="upload-error" style="display:none; margin-top:0.75rem;"></div>
+
+  </form>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/upload.js"></script>
+{% endblock %}

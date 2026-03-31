@@ -1,0 +1,587 @@
+{% extends "base.html" %}
+{#
+  web/templates/admin/dashboard.html
+  Admin dashboard: stats, jobs table, pricing CRUD, export, settings.
+
+  Jinja2 context:
+    stats         — { today_revenue, total_jobs, success_rate, active_job }
+    recent_jobs   — list of job dicts (up to 50)
+    pricing_rules — list of PricingRule dicts
+    printer_name  — str
+    tunnel_url    — str
+    shop_name     — str
+    revenue_chart — list of {date, revenue} for 7 days
+#}
+
+{% block title %}Admin Dashboard — PrintBot{% endblock %}
+
+{% block head_extra %}
+{# Chart.js for 7-day revenue chart #}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+<style>
+  body > main {
+    max-width: 1000px;
+    padding: 0 1rem;
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+  body > footer { display: none; }
+
+  /* ── Admin header bar ────────────────────────────────────────────────────── */
+  .admin-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 0 1.25rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .admin-wordmark {
+    font-family: var(--font-head);
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: var(--ink);
+    letter-spacing: -0.03em;
+    margin: 0;
+  }
+  .admin-wordmark span { color: var(--saffron); }
+  .admin-role-badge {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--ink);
+    color: var(--saffron);
+    padding: 0.2rem 0.625rem;
+    border-radius: var(--radius-sm);
+  }
+
+  /* ── Stat grid ───────────────────────────────────────────────────────────── */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.875rem;
+    margin-bottom: 1.5rem;
+  }
+  @media (min-width: 600px) {
+    .stat-grid { grid-template-columns: repeat(4, 1fr); }
+  }
+
+  /* ── Printer status widget ───────────────────────────────────────────────── */
+  .printer-widget {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    padding: 0.875rem 1.125rem;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: 1.5rem;
+  }
+  .printer-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .printer-status-dot.online  { background: var(--forest); }
+  .printer-status-dot.offline { background: var(--coral); }
+  .printer-status-dot.unknown { background: var(--mist); }
+  .printer-status-dot.checking {
+    background: var(--saffron);
+    animation: blink 1s ease infinite;
+  }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* ── Chart container ─────────────────────────────────────────────────────── */
+  .chart-wrap {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  .chart-title {
+    font-family: var(--font-head);
+    font-size: 0.9375rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0 0 1rem;
+  }
+
+  /* ── Table wrapper ───────────────────────────────────────────────────────── */
+  .table-wrap {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Pricing rule form ───────────────────────────────────────────────────── */
+  .rule-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 0.75rem;
+    align-items: end;
+  }
+
+  /* ── Export section ──────────────────────────────────────────────────────── */
+  .month-picker {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  /* ── Settings section ────────────────────────────────────────────────────── */
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.875rem 0;
+    border-bottom: 1px solid var(--border);
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .settings-row:last-child { border-bottom: none; }
+  .settings-row-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--ink);
+    min-width: 140px;
+  }
+  .settings-row-value {
+    font-size: 0.875rem;
+    color: var(--mist);
+    font-family: 'Courier New', monospace;
+    word-break: break-all;
+  }
+
+  /* ── Coupon table ────────────────────────────────────────────────────────── */
+  .coupon-create-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-top: 1.25rem;
+  }
+</style>
+{% endblock %}
+
+{% block body_start %}
+{# Embed initial data for admin.js #}
+<script id="admin-data" type="application/json">
+{
+  "revenue_chart": {{ revenue_chart | tojson }},
+  "pricing_rules": {{ pricing_rules | tojson }}
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<div style="width:100%;">
+
+  {# ── Admin header ──────────────────────────────────────────────────────── #}
+  <div class="admin-header">
+    <div style="display:flex; align-items:center; gap:0.75rem;">
+      <h1 class="admin-wordmark">Print<span>Bot</span></h1>
+      <span class="admin-role-badge">Admin</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.75rem;">
+      <span style="font-size:0.8125rem; color:var(--mist);">{{ shop_name }}</span>
+      <a href="/admin/logout" class="btn btn-secondary btn-sm">Logout</a>
+    </div>
+  </div>
+
+  {# ── Stat cards ────────────────────────────────────────────────────────── #}
+  <div class="stat-grid">
+    <div class="stat-card">
+      <span class="stat-label">Today's Revenue</span>
+      <span class="stat-value">₹{{ "%.0f"|format(stats.today_revenue) }}</span>
+      <span class="stat-sub">collected today</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Total Jobs</span>
+      <span class="stat-value">{{ stats.total_jobs }}</span>
+      <span class="stat-sub">all time</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Success Rate</span>
+      <span class="stat-value">{{ stats.success_rate }}%</span>
+      <span class="stat-sub">completed / paid</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Active Job</span>
+      <span class="stat-value" id="active-job-stat" style="font-size:1.25rem;">
+        {% if stats.active_job %}
+          <span class="badge badge-printing">Printing</span>
+        {% else %}
+          <span style="font-size:1.5rem; color:var(--forest);">—</span>
+        {% endif %}
+      </span>
+      <span class="stat-sub">currently printing</span>
+    </div>
+  </div>
+
+  {# ── Printer status ────────────────────────────────────────────────────── #}
+  <div class="printer-widget" aria-live="polite">
+    <div class="printer-status-dot checking" id="printer-dot"></div>
+    <div>
+      <div style="font-size:0.875rem; font-weight:600; color:var(--ink);">
+        {{ printer_name or 'No printer configured' }}
+      </div>
+      <div style="font-size:0.75rem; color:var(--mist);" id="printer-status-text">Checking…</div>
+    </div>
+    <div style="margin-left:auto; font-size:0.75rem; color:var(--mist);" id="printer-last-check"></div>
+  </div>
+
+  {# ── 7-day revenue chart ───────────────────────────────────────────────── #}
+  <div class="chart-wrap">
+    <p class="chart-title">Revenue — last 7 days</p>
+    <canvas id="revenue-chart" height="80"></canvas>
+  </div>
+
+  {# ── Tab bar ───────────────────────────────────────────────────────────── #}
+  <div class="tab-bar" role="tablist" aria-label="Admin sections">
+    <button class="tab-item is-active" data-tab="jobs"    role="tab" aria-selected="true">Jobs</button>
+    <button class="tab-item"           data-tab="pricing" role="tab">Pricing</button>
+    <button class="tab-item"           data-tab="export"  role="tab">Export</button>
+    <button class="tab-item"           data-tab="settings" role="tab">Settings</button>
+  </div>
+
+  {# ── Tab: Jobs ─────────────────────────────────────────────────────────── #}
+  <div class="tab-panel is-active" id="panel-jobs" role="tabpanel">
+
+    {# Filter bar #}
+    <div style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-bottom:1rem; align-items:center;">
+      <select id="job-status-filter" class="input" style="width:auto; padding:0.5rem 0.75rem;">
+        <option value="">All statuses</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="printing">Printing</option>
+        <option value="payment_pending">Payment Pending</option>
+        <option value="paid">Paid</option>
+      </select>
+      <input type="text" class="input" id="job-search" placeholder="Search by ID or file…"
+             style="width:auto; flex:1; min-width:160px; padding:0.5rem 0.75rem;">
+      <span style="font-size:0.8125rem; color:var(--mist); margin-left:auto;" id="job-count-label"></span>
+    </div>
+
+    <div class="table-wrap">
+      <div class="table-scroll">
+        <table class="data-table" id="jobs-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Time</th>
+              <th>Files</th>
+              <th>Pages</th>
+              <th>Cost</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody">
+            {% for job in recent_jobs %}
+            <tr data-job-id="{{ job.id }}" data-status="{{ job.status }}">
+              <td>
+                <span style="font-family:'Courier New',monospace; font-size:0.75rem; color:var(--mist);">
+                  {{ job.id[:8] | upper }}
+                </span>
+              </td>
+              <td style="white-space:nowrap; font-size:0.8125rem; color:var(--mist);">
+                {{ job.created_at.strftime('%d %b %H:%M') if job.created_at else '—' }}
+              </td>
+              <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.8125rem;">
+                {% for f in job.files[:2] %}{{ f.original_name }}{% if not loop.last %}, {% endif %}{% endfor %}
+                {% if job.files|length > 2 %} +{{ job.files|length - 2 }} more{% endif %}
+              </td>
+              <td style="font-size:0.875rem; text-align:right;">
+                {{ job.files | sum(attribute='page_count') }}
+              </td>
+              <td style="font-weight:600; white-space:nowrap;">
+                {% if job.total_cost %}₹{{ "%.2f"|format(job.total_cost) }}{% else %}—{% endif %}
+              </td>
+              <td>
+                <span class="badge badge-{{ job.status }}">{{ job.status.replace('_', ' ') | title }}</span>
+              </td>
+              <td style="white-space:nowrap;">
+                {% if job.status == 'failed' %}
+                <button type="button" class="btn btn-sm btn-secondary retry-btn"
+                        data-job-id="{{ job.id }}" style="margin-right:0.375rem;">Retry</button>
+                {% endif %}
+                {% if job.status in ['paid', 'processing', 'payment_pending'] %}
+                <button type="button" class="btn btn-sm btn-danger cancel-btn"
+                        data-job-id="{{ job.id }}">Cancel</button>
+                {% endif %}
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--mist);">
+                No jobs yet.
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {# Pagination #}
+    <div style="display:flex; align-items:center; justify-content:center; gap:0.75rem; margin-top:1rem;" id="jobs-pagination"></div>
+
+  </div>
+
+  {# ── Tab: Pricing ──────────────────────────────────────────────────────── #}
+  <div class="tab-panel" id="panel-pricing" role="tabpanel">
+
+    {# Current rules #}
+    <div class="table-wrap" style="margin-bottom:1.5rem;">
+      <div style="padding:0.875rem 1.125rem; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+        <span style="font-family:var(--font-head); font-weight:700; font-size:0.9375rem;">Pricing Rules</span>
+        <span style="font-size:0.75rem; color:var(--mist);">Rules are matched in order — first match wins</span>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Min Pages</th>
+              <th>Max Pages</th>
+              <th>Type</th>
+              <th>₹ / Sheet</th>
+              <th>Description</th>
+              <th>Active</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="pricing-tbody">
+            {% for rule in pricing_rules %}
+            <tr data-rule-id="{{ rule.id }}">
+              <td>{{ rule.min_pages }}</td>
+              <td>{{ rule.max_pages if rule.max_pages else '∞' }}</td>
+              <td>
+                <span class="badge {% if rule.is_duplex %}badge-paid{% else %}badge-settings_pending{% endif %}">
+                  {{ 'Duplex' if rule.is_duplex else 'Simplex' }}
+                </span>
+              </td>
+              <td style="font-weight:700;">₹{{ "%.2f"|format(rule.price_per_page) }}</td>
+              <td style="font-size:0.8125rem; color:var(--mist);">{{ rule.description or '—' }}</td>
+              <td>
+                <label class="toggle" style="width:36px; height:22px;">
+                  <input type="checkbox" class="rule-active-toggle" data-rule-id="{{ rule.id }}"
+                         {{ 'checked' if rule.is_active else '' }}>
+                  <span class="toggle-track" style="border-radius:11px;"></span>
+                </label>
+              </td>
+              <td>
+                <button type="button" class="btn btn-ghost btn-sm delete-rule-btn"
+                        data-rule-id="{{ rule.id }}" style="color:var(--coral);">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                  </svg>
+                </button>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--mist);">
+                No pricing rules. Add one below.
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {# Add rule form #}
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-head">
+        <span class="card-head-title">Add Pricing Rule</span>
+      </div>
+      <div class="card-body">
+        <div class="rule-form-grid" id="add-rule-form">
+          <div class="field">
+            <label class="label" for="rule-min">Min Pages</label>
+            <input type="number" id="rule-min" class="input" placeholder="1" min="1" value="1">
+          </div>
+          <div class="field">
+            <label class="label" for="rule-max">Max Pages</label>
+            <input type="number" id="rule-max" class="input" placeholder="∞ (leave blank)">
+          </div>
+          <div class="field">
+            <label class="label" for="rule-type">Type</label>
+            <select id="rule-type" class="input">
+              <option value="simplex">Simplex</option>
+              <option value="duplex">Duplex</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="label" for="rule-price">₹ per Sheet</label>
+            <input type="number" id="rule-price" class="input" placeholder="2.00" step="0.50" min="0.01">
+          </div>
+          <div class="field" style="grid-column: span 2;">
+            <label class="label" for="rule-desc">Description (optional)</label>
+            <input type="text" id="rule-desc" class="input" placeholder="e.g. Bulk (>20 pages)">
+          </div>
+        </div>
+        <div style="display:flex; gap:0.75rem; margin-top:1rem; align-items:center; flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary" id="add-rule-btn">Add Rule</button>
+          <span id="rule-form-error" class="field-error" style="display:none;"></span>
+        </div>
+      </div>
+    </div>
+
+    {# Test price calculator #}
+    <div class="card">
+      <div class="card-head">
+        <span class="card-head-title">Test Pricing</span>
+      </div>
+      <div class="card-body">
+        <div style="display:flex; gap:0.75rem; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field">
+            <label class="label" for="test-pages">Page count</label>
+            <input type="number" id="test-pages" class="input" placeholder="10" min="1" style="width:100px;">
+          </div>
+          <div class="field">
+            <label class="label">Type</label>
+            <div style="display:flex; gap:0.5rem; align-items:center; height:42px;">
+              <label style="display:flex; align-items:center; gap:0.375rem; font-size:0.875rem; cursor:pointer;">
+                <input type="radio" name="test-type" value="simplex" checked> Simplex
+              </label>
+              <label style="display:flex; align-items:center; gap:0.375rem; font-size:0.875rem; cursor:pointer;">
+                <input type="radio" name="test-type" value="duplex"> Duplex
+              </label>
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary" id="test-price-btn">Calculate</button>
+        </div>
+        <div id="test-price-result" style="margin-top:0.875rem; font-size:0.9375rem; font-weight:600; color:var(--ink); min-height:1.5em;"></div>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── Tab: Export ───────────────────────────────────────────────────────── #}
+  <div class="tab-panel" id="panel-export" role="tabpanel">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-head-title">Export Jobs CSV</span>
+      </div>
+      <div class="card-body" style="display:flex; flex-direction:column; gap:1rem;">
+        <div class="month-picker">
+          <div class="field">
+            <label class="label" for="export-month">Month</label>
+            <input type="month" id="export-month" class="input"
+                   value="{{ now.strftime('%Y-%m') if now else '' }}"
+                   style="width:auto;">
+          </div>
+          <div style="align-self:flex-end;">
+            <a id="export-btn" class="btn btn-primary" href="#" style="text-decoration:none;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download CSV
+            </a>
+          </div>
+        </div>
+        <p style="font-size:0.8125rem; color:var(--mist);">
+          Downloads all jobs for the selected month as a comma-separated file. Large exports are streamed.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── Tab: Settings ─────────────────────────────────────────────────────── #}
+  <div class="tab-panel" id="panel-settings" role="tabpanel">
+
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-head">
+        <span class="card-head-title">System Configuration</span>
+      </div>
+      <div class="card-body">
+        <div class="settings-row">
+          <span class="settings-row-label">Default Printer</span>
+          <div style="display:flex; gap:0.625rem; align-items:center; flex:1;">
+            <input type="text" class="input" id="printer-name-input" value="{{ printer_name or '' }}"
+                   placeholder="CUPS printer name" style="max-width:280px;">
+            <button type="button" class="btn btn-secondary btn-sm" id="save-printer-btn">Save</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <span class="settings-row-label">Tunnel URL</span>
+          <span class="settings-row-value">{{ tunnel_url or 'Not configured in .env' }}</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-row-label">QR Code</span>
+          <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+            {% if tunnel_url %}
+            <img src="/static/icons/qr_code.png" alt="QR code" width="64" height="64"
+                 style="border-radius:6px; border:1px solid var(--border);">
+            {% endif %}
+            <button type="button" class="btn btn-secondary btn-sm" id="regen-qr-btn">
+              Regenerate QR
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# Coupon management #}
+    <div class="card">
+      <div class="card-head">
+        <span class="card-head-title">Coupons</span>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+          <table class="data-table" id="coupons-table">
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Balance</th>
+                <th>Created</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="coupons-tbody">
+              <tr>
+                <td colspan="4" style="text-align:center; padding:1.5rem; color:var(--mist);" id="coupons-loading">
+                  Loading…
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {# Create manual coupon #}
+        <div class="coupon-create-row">
+          <div class="field">
+            <label class="label" for="coupon-amount">Amount (₹)</label>
+            <input type="number" id="coupon-amount" class="input" placeholder="50.00" min="0.01" step="0.50" style="width:120px;">
+          </div>
+          <button type="button" class="btn btn-secondary" id="create-coupon-btn">Create Coupon</button>
+          <span id="coupon-create-result" style="font-size:0.875rem; color:var(--forest); align-self:flex-end; min-height:36px; display:flex; align-items:center;"></span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/admin.js"></script>
+{% endblock %}
