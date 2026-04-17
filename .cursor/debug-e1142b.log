@@ -1,2 +1,0 @@
-{"sessionId": "e1142b", "runId": "post-fix", "hypothesisId": "A", "location": "admin.py:logout", "message": "logout POST reached", "data": {"method": "POST"}, "timestamp": 1775296145217}
-{"sessionId": "e1142b", "runId": "post-fix", "hypothesisId": "A", "location": "admin.py:logout", "message": "logout POST reached", "data": {"method": "POST"}, "timestamp": 1775296160316}
