@@ -1,44 +1,45 @@
 /**
- * static/js/settings.js — Print settings page controller.
+ * static/js/settings.js — Print settings page controller (Prompt C rebuild).
  *
  * Responsibilities:
- *  1. Render PDF.js thumbnails lazily via IntersectionObserver.
- *  2. Manage per-page include/exclude and rotation state.
- *  3. Listen for N-up / copies / duplex changes and recalculate price.
- *  4. Parse page range input ("1-5, 8, 10-12") and update selection.
- *  5. Handle coupon application via AJAX.
- *  6. On "Confirm & Pay": POST to /api/settings/confirm, open Razorpay.
+ *  1. Build the horizontal thumbnail strip from server-provided PNG URLs.
+ *  2. Open / close the bottom-sheet panel for per-page include/exclude/rotation.
+ *  3. Copies stepper (with tap-and-hold), duplex toggle, N-up layout selector.
+ *  4. Page range input — parses "1-5, 8, 11-20" into selections.
+ *  5. Coupon validation via POST /api/coupon/check (no full reload).
+ *  6. recalcPrice() — pure JS math, updates price card and CTA, <50ms.
+ *  7. Optimistic CTA: opens Razorpay modal immediately, confirms to server in parallel.
  *
  * State shape:
- *   files: [{
- *     id: number,
- *     pageCount: number,
- *     pages: [{ idx: number, include: boolean, rotation: number }]
- *   }]
+ *   files: [{ id: number, pages: [{ idx: number, include: boolean, rotation: number }] }]
  *
- * Design rules:
- *  - textContent only for user-visible content.
- *  - showToast() for global notifications.
- *  - No alert(), no jQuery.
+ * Design rules enforced:
+ *   - textContent only for user content (never innerHTML for user data)
+ *   - showToast() for global notifications, inline messages for field feedback
+ *   - No alert(), no jQuery, no external libs
+ *   - No server calls for price calculation
  */
 
 (function () {
   'use strict';
 
-  // ── Read embedded job data ────────────────────────────────────────────────────
+  // ── Read embedded job data ──────────────────────────────────────────────────
+
   var dataEl = document.getElementById('job-data');
   if (!dataEl) { console.error('settings.js: #job-data not found'); return; }
 
   var jobData;
   try { jobData = JSON.parse(dataEl.textContent); }
-  catch (e) { console.error('settings.js: failed to parse job data', e); return; }
+  catch (e) { console.error('settings.js: failed to parse job-data', e); return; }
 
-  var jobId        = jobData.job_id;
-  var serverFiles  = jobData.files;       // [{id, original_name, page_count, ...}]
-  var pricingRules = jobData.pricing_rules; // [{min_pages, max_pages, is_duplex, price_per_page}]
-  var priceFallback = jobData.price_fallback;
+  var jobId          = jobData.job_id;
+  var serverFiles    = jobData.files;
+  var pricingRules   = jobData.pricing_rules || [];
+  var priceFallback  = jobData.price_fallback || 2.0;
+  var razorpayKeyId  = jobData.razorpay_key_id || '';
+  var isMockPayment  = jobData.is_mock_payment || false;
 
-  // ── State ─────────────────────────────────────────────────────────────────────
+  // ── State ────────────────────────────────────────────────────────────────────
 
   var state = {
     files: serverFiles.map(function (f) {
@@ -48,521 +49,627 @@
       }
       return { id: f.id, pageCount: f.page_count, pages: pages };
     }),
-    copies:   1,
-    isDuplex: false,
-    nup:      1,
-    coupon:   null,   // { code, discount } or null
+    copies:           1,
+    isDuplex:         false,
+    nup:              1,
+    coupon:           null,  // { code: string, discount: number } | null
+    _sheetFileId:     null,
+    _sheetPageIdx:    null,
+    _sheetGlobalIdx:  null,
+    _overlayWasOpen:  false,
+    _filmstripBuilt:  false,
   };
 
-  // ── DOM references ────────────────────────────────────────────────────────────
+  // Flat ordered list of all pages across all files — used by viewer navigation
+  var _pageList = [];
+  serverFiles.forEach(function (sf) {
+    for (var i = 0; i < sf.page_count; i++) {
+      _pageList.push({ fileId: sf.id, pageIdx: i });
+    }
+  });
+
+  // ── DOM references ───────────────────────────────────────────────────────────
+
+  var pagesGrid          = document.getElementById('pages-grid');
+  var pagesOverlay       = document.getElementById('pages-overlay');
+  var pagesOverlayBack   = document.getElementById('pages-overlay-backdrop');
+  var pagesOverlayClose  = document.getElementById('pages-overlay-close');
+  var pagesPreviewBtn    = document.getElementById('pages-preview-btn');
+  var pagesToggleAllBtn  = document.getElementById('pages-toggle-all-btn');
+  var pagesSummaryCount  = document.getElementById('pages-summary-count');
+  var pagesOverlaySub    = document.getElementById('pages-overlay-sub');
+
+  var noPagesMsg     = document.getElementById('no-pages-msg');
   var copiesValue    = document.getElementById('copies-value');
   var copiesInc      = document.getElementById('copies-inc');
   var copiesDec      = document.getElementById('copies-dec');
   var duplexToggle   = document.getElementById('duplex-toggle');
   var duplexHint     = document.getElementById('duplex-hint');
+  var pricePages     = document.getElementById('price-pages');
+  var priceSheets    = document.getElementById('price-sheets');
+  var priceSheetsS   = document.getElementById('price-sheets-s');
+  var pricePerSheet  = document.getElementById('price-per-sheet');
+  var priceSubtotal  = document.getElementById('price-subtotal');
+  var couponDiscRow  = document.getElementById('coupon-discount-row');
+  var couponDiscVal  = document.getElementById('coupon-discount-value');
+  var priceTotal     = document.getElementById('price-total');
+  var ctaPrice       = document.getElementById('cta-price');
   var confirmBtn     = document.getElementById('confirm-btn');
-  var confirmStatus  = document.getElementById('confirm-status');
-  var noPagesMsg     = document.getElementById('no-pages-msg');
+  var moreToggle     = document.getElementById('more-options-toggle');
+  var moreBody       = document.getElementById('more-options-body');
+  var pageRangeInput = document.getElementById('page-range-input');
+  var pageRangeError = document.getElementById('page-range-error');
   var couponInput    = document.getElementById('coupon-input');
   var couponApplyBtn = document.getElementById('coupon-apply-btn');
-  var couponApplied  = document.getElementById('coupon-applied-msg');
-  var couponAppliedT = document.getElementById('coupon-applied-text');
-  var couponRemoveBtn= document.getElementById('coupon-remove-btn');
-  var couponErrorMsg = document.getElementById('coupon-error-msg');
-  var couponInputRow = document.getElementById('coupon-input-row');
+  var couponResult   = document.getElementById('coupon-result');
+  var sheetBackdrop     = document.getElementById('sheet-backdrop');
+  var bottomSheet       = document.getElementById('bottom-sheet');
+  var sheetPreviewImg   = document.getElementById('sheet-preview-img');
+  var sheetPreviewPaper = document.getElementById('sheet-preview-paper');
+  var sheetPageCounter  = document.getElementById('sheet-page-counter');
+  var sheetIncBtn       = document.getElementById('sheet-include-btn');
+  var sheetExcBtn       = document.getElementById('sheet-exclude-btn');
+  var sheetDoneBtn      = document.getElementById('sheet-done-btn');
+  var sheetBackBtn      = document.getElementById('sheet-back-btn');
+  var sheetPrevBtn      = document.getElementById('sheet-prev-btn');
+  var sheetNextBtn      = document.getElementById('sheet-next-btn');
+  var sheetFilmstrip    = document.getElementById('sheet-filmstrip');
+  var orientBtns        = document.querySelectorAll('.orient-btn');
+  var layoutBtns        = document.querySelectorAll('.layout-btn');
 
-  // Price display
-  var pricePages    = document.getElementById('price-pages');
-  var priceSheets   = document.getElementById('price-sheets');
-  var priceCopies   = document.getElementById('price-copies');
-  var pricePerSheet = document.getElementById('price-per-sheet');
-  var priceTotal    = document.getElementById('price-total');
-  var couponDiscRow = document.getElementById('coupon-discount-row');
-  var couponDiscVal = document.getElementById('coupon-discount-value');
-
-  // ── Pricing calculator ────────────────────────────────────────────────────────
+  // ── Pricing calculator ───────────────────────────────────────────────────────
 
   function totalSelectedPages() {
     var total = 0;
     state.files.forEach(function (f) {
-      f.pages.forEach(function (p) { if (p.include) { total++; } });
+      f.pages.forEach(function (p) { if (p.include) total++; });
     });
     return total;
   }
 
-  function sheetsNeeded(pages, isDuplex, nup) {
-    // Pages after N-up grouping
-    var pagesPerSheet = nup;
-    var sheetsForContent = Math.ceil(pages / pagesPerSheet);
-    // Duplex halves the sheets (rounded up)
-    if (isDuplex) {
-      return Math.ceil(sheetsForContent / 2);
-    }
-    return sheetsForContent;
+  function totalAllPages() {
+    var total = 0;
+    state.files.forEach(function (f) { total += f.pageCount; });
+    return total;
   }
 
-  /**
-   * Find the matching pricing rule for a given (page count, isDuplex) pair.
-   * Returns price_per_page or the fallback.
-   */
+  function sheetsNeeded(pages, isDuplex, nup) {
+    var pagesPerPhysicalSide = nup;
+    var contentSheets = Math.ceil(pages / pagesPerPhysicalSide);
+    return isDuplex ? Math.ceil(contentSheets / 2) : contentSheets;
+  }
+
   function getPricePerSheet(sheetCount, isDuplex) {
-    var matched = null;
     if (pricingRules && pricingRules.length > 0) {
       for (var i = 0; i < pricingRules.length; i++) {
-        var rule = pricingRules[i];
-        if (rule.is_active === false) { continue; }
-        if (rule.is_duplex !== isDuplex) { continue; }
-        var inRange = sheetCount >= rule.min_pages
-          && (rule.max_pages === null || sheetCount <= rule.max_pages);
-        if (inRange) { matched = rule; break; }
+        var r = pricingRules[i];
+        if (r.is_active === false) continue;
+        if (r.is_duplex !== isDuplex) continue;
+        var inRange = sheetCount >= r.min_pages &&
+                      (r.max_pages === null || sheetCount <= r.max_pages);
+        if (inRange) return r.price_per_page;
       }
     }
-    return matched ? matched.price_per_page : priceFallback;
+    return priceFallback;
   }
 
   function recalcPrice() {
-    var pages  = totalSelectedPages();
-    var sheets = sheetsNeeded(pages, state.isDuplex, state.nup);
+    var pages       = totalSelectedPages();
+    var sheets      = sheetsNeeded(pages, state.isDuplex, state.nup);
     var totalSheets = sheets * state.copies;
     var unitPrice   = getPricePerSheet(totalSheets, state.isDuplex);
     var subtotal    = unitPrice * totalSheets;
-    var discount    = 0;
-    if (state.coupon) {
-      discount = Math.min(state.coupon.discount, subtotal);
-    }
-    var total = Math.max(0, subtotal - discount);
+    var discount    = state.coupon ? Math.min(state.coupon.discount, subtotal) : 0;
+    var total       = Math.max(0, subtotal - discount);
 
-    // Update price display
     pricePages.textContent    = pages;
     priceSheets.textContent   = totalSheets;
-    priceCopies.textContent   = state.copies;
-    pricePerSheet.textContent = '₹' + unitPrice.toFixed(2);
-    priceTotal.textContent    = '₹' + total.toFixed(2);
+    priceSheetsS.textContent  = totalSheets === 1 ? '' : 's';
+    pricePerSheet.textContent = '\u20b9' + unitPrice.toFixed(2);
+    priceSubtotal.textContent = '\u20b9' + subtotal.toFixed(2);
+    priceTotal.textContent    = '\u20b9' + total.toFixed(2);
+    ctaPrice.textContent      = '\u20b9' + total.toFixed(2);
 
     if (discount > 0) {
       couponDiscRow.style.display = '';
-      couponDiscVal.textContent   = '−₹' + discount.toFixed(2);
+      couponDiscVal.textContent   = '\u2212\u20b9' + discount.toFixed(2);
     } else {
       couponDiscRow.style.display = 'none';
     }
 
-    // Duplex needs ≥ 2 pages
     var canDuplex = pages >= 2;
     duplexToggle.disabled = !canDuplex;
-    duplexHint.style.display = !canDuplex ? '' : 'none';
-    if (!canDuplex && state.isDuplex) {
-      state.isDuplex = false;
-      duplexToggle.checked = false;
+    if (!canDuplex) {
+      duplexHint.textContent = 'Select at least 2 pages to enable front & back printing';
+      duplexHint.style.color = 'var(--warning)';
+      if (state.isDuplex) {
+        state.isDuplex = false;
+        duplexToggle.checked = false;
+      }
+    } else {
+      duplexHint.textContent = 'Saves paper — prints on both sides of each sheet';
+      duplexHint.style.color = '';
     }
 
-    // Confirm button state
+    // Summary bar + overlay header
+    var allPages = totalAllPages();
+    var skipped  = allPages - pages;
+    var summaryText = skipped === 0
+      ? 'All ' + allPages + ' page' + (allPages === 1 ? '' : 's') + ' selected'
+      : pages + ' of ' + allPages + ' pages selected';
+    if (pagesSummaryCount) pagesSummaryCount.textContent = summaryText;
+    if (pagesOverlaySub) {
+      pagesOverlaySub.textContent = skipped === 0
+        ? 'Tap a page to preview it — use \u2713/\u2715 to skip'
+        : skipped + ' page' + (skipped === 1 ? '' : 's') + ' skipped — tap \u2713/\u2715 chips to restore';
+    }
+    // "Restore all" only appears when something is skipped
+    if (pagesToggleAllBtn) {
+      pagesToggleAllBtn.style.display = skipped > 0 ? '' : 'none';
+    }
+
+    // CTA
     var canConfirm = pages > 0;
     confirmBtn.disabled = !canConfirm;
-    confirmBtn.setAttribute('aria-disabled', canConfirm ? 'false' : 'true');
     noPagesMsg.style.display = canConfirm ? 'none' : '';
-
-    return { pages, sheets: totalSheets, unitPrice, subtotal, discount, total };
   }
 
-  // ── Thumbnails via PDF.js ────────────────────────────────────────────────────
+  // ── Pages grid ───────────────────────────────────────────────────────────────
 
-  var renderQueues  = {};   // fileId → queue of pageIdx to render
-  var activeRenders = {};   // fileId → boolean
+  function buildPagesGrid() {
+    pagesGrid.innerHTML = '';
 
-  /**
-   * Create skeleton placeholder elements for all pages of a file.
-   * Real canvases are swapped in when the grid comes into view.
-   */
-  function initSkeletons(fileId, pageCount) {
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (!grid) { return; }
+    serverFiles.forEach(function (serverFile) {
+      var fileState = getFileState(serverFile.id);
+      if (!fileState) return;
 
-    var fState = state.files.find(function (f) { return f.id === fileId; });
+      var thumbUrls = serverFile.thumb_urls || [];
+      for (var i = 0; i < serverFile.page_count; i++) {
+        (function (pageIdx) {
+          var pageState = fileState.pages[pageIdx];
+          var item = document.createElement('div');
+          item.className = 'thumb-item' + (pageState && pageState.include ? '' : ' is-excluded');
+          item.dataset.fileId  = serverFile.id;
+          item.dataset.pageIdx = pageIdx;
+          item.setAttribute('role', 'button');
+          item.setAttribute('tabindex', '0');
+          item.setAttribute('aria-label', 'Page ' + (pageIdx + 1) + ' — tap to preview');
 
-    for (var i = 0; i < pageCount; i++) {
-      (function (idx) {
-        var wrapper = document.createElement('div');
-        wrapper.dataset.pageIdx = idx;
-        wrapper.className = 'thumb-item' + (fState && fState.pages[idx].include ? ' is-selected' : ' is-excluded');
-        wrapper.setAttribute('aria-label', 'Page ' + (idx + 1));
+          // Thumbnail image — stored in data-src, loaded when overlay opens
+          var thumbUrl = thumbUrls[pageIdx] || '';
+          if (thumbUrl) {
+            var skel = document.createElement('div');
+            skel.className = 'thumb-skeleton skeleton';
+            item.appendChild(skel);
 
-        var skeleton = document.createElement('div');
-        skeleton.className = 'thumb-skeleton';
-        wrapper.appendChild(skeleton);
+            var img = document.createElement('img');
+            img.className = 'thumb-canvas';
+            img.alt       = 'Page ' + (pageIdx + 1);
+            img.style.display = 'none';
+            img.dataset.src   = thumbUrl;  // loaded on overlay open, not now
 
-        var pageNum = document.createElement('div');
-        pageNum.className = 'thumb-page-num';
-        pageNum.textContent = idx + 1;
-        wrapper.appendChild(pageNum);
+            img.onload = function () {
+              skel.style.display = 'none';
+              img.style.display  = 'block';
+            };
+            img.onerror = function () {
+              skel.classList.remove('skeleton');
+              skel.style.background = 'var(--cream)';
+              skel.style.display = 'block';
+            };
+            item.appendChild(img);
+          } else {
+            var placeholder = document.createElement('div');
+            placeholder.className = 'thumb-skeleton';
+            placeholder.style.background = 'var(--cream)';
+            item.appendChild(placeholder);
+          }
 
-        var controls = buildThumbControls(fileId, idx);
-        wrapper.appendChild(controls);
+          // Page number
+          var label = document.createElement('span');
+          label.className   = 'thumb-page-num';
+          label.textContent = pageIdx + 1;
+          item.appendChild(label);
 
-        grid.appendChild(wrapper);
-      })(i);
-    }
-  }
+          // Skip indicator — shown only on excluded pages, styled via CSS
+          var badge = document.createElement('span');
+          badge.className = 'thumb-state-badge';
+          badge.setAttribute('aria-hidden', 'true');
+          item.appendChild(badge);
 
-  function buildThumbControls(fileId, pageIdx) {
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    var pState = fState ? fState.pages[pageIdx] : { include: true, rotation: 0 };
+          // Rotation badge — shown when page has non-zero rotation
+          var rotBadge = document.createElement('span');
+          rotBadge.className = 'thumb-rot-badge';
+          rotBadge.setAttribute('aria-hidden', 'true');
+          rotBadge.textContent = '\u21BB';  // ↻
+          rotBadge.style.display = (pageState && pageState.rotation !== 0) ? 'flex' : 'none';
+          item.appendChild(rotBadge);
 
-    var row = document.createElement('div');
-    row.className = 'thumb-controls';
+          // Quick include/exclude chip (bottom-right corner)
+          var chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'thumb-toggle-btn' + (pageState && pageState.include ? ' is-included' : ' is-excluded-chip');
+          chip.setAttribute('aria-label', (pageState && pageState.include ? 'Skip' : 'Include') + ' page ' + (pageIdx + 1));
+          chip.addEventListener('click', function (e) {
+            e.stopPropagation();
+            togglePageInclusion(serverFile.id, pageIdx);
+          });
+          item.appendChild(chip);
 
-    // Rotation button
-    var rotBtn = document.createElement('button');
-    rotBtn.type = 'button';
-    rotBtn.className = 'thumb-rotate-btn';
-    rotBtn.setAttribute('aria-label', 'Rotate page ' + (pageIdx + 1));
-    rotBtn.title = 'Rotate 90°';
-    rotBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
-    rotBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      rotatePage(fileId, pageIdx);
-    });
+          // Tap item → open full-page viewer
+          item.addEventListener('click', function (e) {
+            if (e.target.closest('.thumb-toggle-btn')) return;
+            openSheet(serverFile.id, pageIdx);
+          });
+          item.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              openSheet(serverFile.id, pageIdx);
+            }
+          });
 
-    // Include/exclude button
-    var inclBtn = document.createElement('button');
-    inclBtn.type = 'button';
-    inclBtn.className = 'thumb-include-btn ' + (pState.include ? 'is-included' : 'is-excluded');
-    inclBtn.setAttribute('aria-label', (pState.include ? 'Exclude' : 'Include') + ' page ' + (pageIdx + 1));
-    inclBtn.innerHTML = pState.include
-      ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
-      : '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-    inclBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      togglePage(fileId, pageIdx);
-    });
-
-    row.appendChild(rotBtn);
-    row.appendChild(inclBtn);
-    return row;
-  }
-
-  /**
-   * Start rendering thumbnails for a file's grid using PDF.js.
-   * Uses IntersectionObserver for lazy loading.
-   */
-  function attachObserver(fileId, pageCount) {
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (!grid) { return; }
-    if (typeof IntersectionObserver === 'undefined') {
-      // FALLBACK: render all immediately if IO not supported
-      renderAllThumbnails(fileId, pageCount);
-      return;
-    }
-
-    var observer = new IntersectionObserver(function (entries) {
-      entries.forEach(function (entry) {
-        if (entry.isIntersecting) {
-          observer.unobserve(entry.target);
-          var idx = parseInt(entry.target.dataset.pageIdx, 10);
-          queueRender(fileId, idx, entry.target);
-        }
-      });
-    }, { rootMargin: '200px 0px' });
-
-    var wrappers = grid.querySelectorAll('.thumb-item');
-    wrappers.forEach(function (w) { observer.observe(w); });
-  }
-
-  function queueRender(fileId, pageIdx, wrapper) {
-    if (!renderQueues[fileId]) { renderQueues[fileId] = []; }
-    renderQueues[fileId].push({ pageIdx: pageIdx, wrapper: wrapper });
-    if (!activeRenders[fileId]) { processQueue(fileId); }
-  }
-
-  function processQueue(fileId) {
-    var q = renderQueues[fileId];
-    if (!q || q.length === 0) { activeRenders[fileId] = false; return; }
-    activeRenders[fileId] = true;
-
-    var item = q.shift();
-    renderThumb(fileId, item.pageIdx, item.wrapper).then(function () {
-      processQueue(fileId);
+          pagesGrid.appendChild(item);
+        })(i);
+      }
     });
   }
 
-  /**
-   * Render a single page as a canvas thumbnail using PDF.js.
-   * Falls back to a labelled box if rendering fails.
-   */
-  function renderThumb(fileId, pageIdx, wrapper) {
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (!grid) { return Promise.resolve(); }
-
-    var fileUrl = grid.dataset.fileUrl + pageIdx;
-
-    if (typeof pdfjsLib === 'undefined') {
-      // PDF.js not loaded — show page number only
-      replaceSkeleton(wrapper, null, pageIdx);
-      return Promise.resolve();
-    }
-
-    return pdfjsLib.getDocument(fileUrl).promise
-      .then(function (pdf) {
-        return pdf.getPage(1); // Each thumbnail endpoint returns single-page doc
-      })
-      .then(function (page) {
-        var viewport = page.getViewport({ scale: 1 });
-        var targetWidth = 100;
-        var scale = targetWidth / viewport.width;
-        var scaledViewport = page.getViewport({ scale: scale });
-
-        var canvas = document.createElement('canvas');
-        canvas.className = 'thumb-canvas';
-        canvas.width  = scaledViewport.width;
-        canvas.height = scaledViewport.height;
-
-        var ctx = canvas.getContext('2d');
-        return page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
-          .then(function () { return canvas; });
-      })
-      .then(function (canvas) {
-        replaceSkeleton(wrapper, canvas, pageIdx);
-      })
-      .catch(function (err) {
-        // EDGE CASE: thumbnail not yet available (DOCX still converting)
-        // Show page number box as fallback
-        replaceSkeleton(wrapper, null, pageIdx);
-      });
-  }
-
-  function replaceSkeleton(wrapper, canvas, pageIdx) {
-    var skeleton = wrapper.querySelector('.thumb-skeleton');
-    if (!skeleton) { return; }
-
-    if (canvas) {
-      wrapper.insertBefore(canvas, skeleton);
-    } else {
-      // FALLBACK: render a labelled placeholder
-      var ph = document.createElement('div');
-      ph.style.cssText = 'padding-bottom:141%; background:var(--cream); display:flex; align-items:center; justify-content:center; font-size:0.75rem; color:var(--mist); position:relative;';
-      var label = document.createElement('span');
-      label.style.cssText = 'position:absolute; top:50%; left:50%; transform:translate(-50%,-50%)';
-      label.textContent = 'p.' + (pageIdx + 1);
-      ph.appendChild(label);
-      wrapper.insertBefore(ph, skeleton);
-    }
-
-    wrapper.removeChild(skeleton);
-  }
-
-  function renderAllThumbnails(fileId, pageCount) {
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (!grid) { return; }
-    var wrappers = grid.querySelectorAll('.thumb-item');
-    wrappers.forEach(function (w) {
-      var idx = parseInt(w.dataset.pageIdx, 10);
-      queueRender(fileId, idx, w);
-    });
-  }
-
-  // ── Per-page controls ────────────────────────────────────────────────────────
-
-  function getThumbWrapper(fileId, pageIdx) {
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (!grid) { return null; }
-    return grid.querySelector('[data-page-idx="' + pageIdx + '"]');
-  }
-
-  function refreshThumbState(fileId, pageIdx) {
-    var wrapper = getThumbWrapper(fileId, pageIdx);
-    if (!wrapper) { return; }
-
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    var pState = fState ? fState.pages[pageIdx] : null;
-    if (!pState) { return; }
-
-    wrapper.classList.toggle('is-selected', pState.include);
-    wrapper.classList.toggle('is-excluded', !pState.include);
-
-    var canvas = wrapper.querySelector('canvas');
-    if (canvas && pState.rotation !== undefined) {
-      canvas.style.transform = 'rotate(' + pState.rotation + 'deg)';
-      // Swap width/height for 90/270 to avoid clipping
-      var is90or270 = (pState.rotation === 90 || pState.rotation === 270);
-      canvas.style.transformOrigin = 'center center';
-    }
-
-    // Rebuild controls
-    var existingControls = wrapper.querySelector('.thumb-controls');
-    if (existingControls) { wrapper.removeChild(existingControls); }
-    wrapper.appendChild(buildThumbControls(fileId, pageIdx));
-  }
-
-  function togglePage(fileId, pageIdx) {
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    if (!fState) { return; }
-    fState.pages[pageIdx].include = !fState.pages[pageIdx].include;
-    refreshThumbState(fileId, pageIdx);
+  function togglePageInclusion(fileId, pageIdx) {
+    var pState = getPageState(fileId, pageIdx);
+    if (!pState) return;
+    pState.include = !pState.include;
+    renderThumbnailStates();
     recalcPrice();
   }
 
-  function rotatePage(fileId, pageIdx) {
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    if (!fState) { return; }
-    fState.pages[pageIdx].rotation = (fState.pages[pageIdx].rotation + 90) % 360;
-    refreshThumbState(fileId, pageIdx);
-  }
+  function renderThumbnailStates() {
+    var items = pagesGrid.querySelectorAll('.thumb-item');
+    items.forEach(function (item) {
+      var fileId  = parseInt(item.dataset.fileId, 10);
+      var pageIdx = parseInt(item.dataset.pageIdx, 10);
+      var fState  = getFileState(fileId);
+      if (!fState) return;
+      var pState  = fState.pages[pageIdx];
+      if (!pState) return;
 
-  // ── Select all / Deselect all ────────────────────────────────────────────────
+      // Excluded overlay
+      item.classList.toggle('is-excluded', !pState.include);
 
-  function selectAllForFile(fileId, include) {
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    if (!fState) { return; }
-    fState.pages.forEach(function (p) { p.include = include; });
+      // Quick-toggle chip
+      var chip = item.querySelector('.thumb-toggle-btn');
+      if (chip) {
+        chip.classList.toggle('is-included', pState.include);
+        chip.classList.toggle('is-excluded-chip', !pState.include);
+        chip.setAttribute('aria-label', (pState.include ? 'Skip' : 'Include') + ' page ' + (pageIdx + 1));
+      }
 
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (grid) {
-      var wrappers = grid.querySelectorAll('.thumb-item');
-      wrappers.forEach(function (w) {
-        var idx = parseInt(w.dataset.pageIdx, 10);
-        refreshThumbState(fileId, idx);
+      // Rotation badge
+      var rotBadge = item.querySelector('.thumb-rot-badge');
+      if (rotBadge) {
+        rotBadge.style.display = pState.rotation !== 0 ? 'flex' : 'none';
+      }
+    });
+
+    // Mirror excluded state in filmstrip if it's built
+    if (state._filmstripBuilt && sheetFilmstrip) {
+      var filmItems = sheetFilmstrip.querySelectorAll('.filmstrip-item');
+      filmItems.forEach(function (fi, idx) {
+        var page = _pageList[idx];
+        if (!page) return;
+        var ps = getPageState(page.fileId, page.pageIdx);
+        if (!ps) return;
+        fi.classList.toggle('is-excluded', !ps.include);
       });
     }
-    recalcPrice();
   }
 
-  document.querySelectorAll('.select-all-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      selectAllForFile(parseInt(btn.dataset.fileId, 10), true);
-    });
-  });
-  document.querySelectorAll('.deselect-all-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      selectAllForFile(parseInt(btn.dataset.fileId, 10), false);
-    });
-  });
+  // ── Full-page viewer (bottom-sheet) ─────────────────────────────────────────
 
-  // ── Page range parser ────────────────────────────────────────────────────────
+  function openSheet(fileId, pageIdx) {
+    var fState = getFileState(fileId);
+    if (!fState) return;
+    var pState = fState.pages[pageIdx];
+    if (!pState) return;
 
-  /**
-   * Parse "1-5, 8, 10-12" into a Set of 0-based page indices.
-   * Returns null if the string is empty (no-op).
-   * Returns Set or throws for invalid syntax.
-   */
-  function parsePageRange(rangeStr, maxPage) {
-    rangeStr = rangeStr.trim();
-    if (!rangeStr) { return null; }
+    // Find global index in flat page list
+    var globalIdx = -1;
+    for (var gi = 0; gi < _pageList.length; gi++) {
+      if (_pageList[gi].fileId === fileId && _pageList[gi].pageIdx === pageIdx) {
+        globalIdx = gi;
+        break;
+      }
+    }
+    if (globalIdx === -1) return;
 
-    var result = new Set();
-    var parts  = rangeStr.split(',');
+    // If the overlay is open, close it and remember to re-open on "Back"
+    if (pagesOverlay.classList.contains('is-open')) {
+      state._overlayWasOpen = true;
+      closePagesOverlay();
+    }
 
-    for (var i = 0; i < parts.length; i++) {
-      var part = parts[i].trim();
-      if (!part) { continue; }
+    state._sheetFileId    = fileId;
+    state._sheetPageIdx   = pageIdx;
+    state._sheetGlobalIdx = globalIdx;
 
-      var dashIdx = part.indexOf('-');
-      if (dashIdx > 0) {
-        var from = parseInt(part.substring(0, dashIdx).trim(), 10);
-        var to   = parseInt(part.substring(dashIdx + 1).trim(), 10);
-        if (isNaN(from) || isNaN(to) || from < 1 || to > maxPage || from > to) {
-          throw new Error('Invalid range: ' + part);
-        }
-        for (var p = from; p <= to; p++) { result.add(p - 1); }
+    // Page counter
+    sheetPageCounter.textContent = 'Page ' + (globalIdx + 1) + ' of ' + _pageList.length;
+
+    // Preview image
+    var serverFile = serverFiles.find(function (f) { return f.id === fileId; });
+    var thumbUrl   = serverFile && serverFile.thumb_urls ? serverFile.thumb_urls[pageIdx] : '';
+    sheetPreviewImg.src = thumbUrl || '';
+    sheetPreviewImg.alt = 'Page ' + (pageIdx + 1);
+
+    // Apply rotation/orientation
+    updateSheetIncExc(pState.include);
+    updateOrientToggle(pState.rotation);
+    applyPreviewOrientation(pState.rotation);
+
+    // Prev/next button disabled states
+    sheetPrevBtn.disabled = globalIdx <= 0;
+    sheetNextBtn.disabled = globalIdx >= _pageList.length - 1;
+
+    // Build filmstrip once, then update active item
+    if (!state._filmstripBuilt) {
+      buildFilmstrip();
+      state._filmstripBuilt = true;
+    }
+    updateFilmstripActive(globalIdx);
+
+    // Open
+    bottomSheet.classList.add('is-open');
+    bottomSheet.setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeSheet() {
+    bottomSheet.classList.remove('is-open');
+    bottomSheet.setAttribute('aria-hidden', 'true');
+    document.body.style.overflow = '';
+    state._sheetFileId    = null;
+    state._sheetPageIdx   = null;
+    state._sheetGlobalIdx = null;
+  }
+
+  function navigateSheet(direction) {
+    if (state._sheetGlobalIdx === null) return;
+    var next = state._sheetGlobalIdx + direction;
+    if (next < 0 || next >= _pageList.length) return;
+    var page = _pageList[next];
+    openSheet(page.fileId, page.pageIdx);
+  }
+
+  function buildFilmstrip() {
+    sheetFilmstrip.innerHTML = '';
+    _pageList.forEach(function (page, idx) {
+      var sf       = serverFiles.find(function (f) { return f.id === page.fileId; });
+      var thumbUrl = sf && sf.thumb_urls ? sf.thumb_urls[page.pageIdx] : '';
+      var ps       = getPageState(page.fileId, page.pageIdx);
+
+      var fi = document.createElement('button');
+      fi.type = 'button';
+      fi.className = 'filmstrip-item' + (ps && !ps.include ? ' is-excluded' : '');
+      fi.dataset.globalIdx = idx;
+      fi.setAttribute('aria-label', 'Jump to page ' + (idx + 1));
+
+      if (thumbUrl) {
+        var img = document.createElement('img');
+        img.src = thumbUrl;
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        fi.appendChild(img);
       } else {
-        var pg = parseInt(part, 10);
-        if (isNaN(pg) || pg < 1 || pg > maxPage) {
-          throw new Error('Invalid page: ' + part);
-        }
-        result.add(pg - 1);
+        var ph = document.createElement('div');
+        ph.className = 'filmstrip-placeholder';
+        fi.appendChild(ph);
       }
-    }
-    return result;
+
+      var num = document.createElement('span');
+      num.textContent = idx + 1;
+      fi.appendChild(num);
+
+      (function (capturedIdx) {
+        fi.addEventListener('click', function () {
+          var p = _pageList[capturedIdx];
+          openSheet(p.fileId, p.pageIdx);
+        });
+      })(idx);
+
+      sheetFilmstrip.appendChild(fi);
+    });
   }
 
-  function applyPageRange(fileId, rangeStr) {
-    var fState = state.files.find(function (f) { return f.id === fileId; });
-    if (!fState) { return; }
-
-    var set;
-    try { set = parsePageRange(rangeStr, fState.pageCount); }
-    catch (e) {
-      if (typeof showToast === 'function') {
-        showToast(e.message, 'error');
-      }
-      return;
-    }
-
-    if (set === null) {
-      // Empty — no change
-      return;
-    }
-
-    fState.pages.forEach(function (p) {
-      p.include = set.has(p.idx);
+  function updateFilmstripActive(globalIdx) {
+    if (!sheetFilmstrip) return;
+    var items = sheetFilmstrip.querySelectorAll('.filmstrip-item');
+    items.forEach(function (fi, i) {
+      fi.classList.toggle('is-active', i === globalIdx);
     });
-
-    var grid = document.getElementById('thumb-grid-' + fileId);
-    if (grid) {
-      var wrappers = grid.querySelectorAll('.thumb-item');
-      wrappers.forEach(function (w) {
-        refreshThumbState(fileId, parseInt(w.dataset.pageIdx, 10));
-      });
+    // Scroll active item into view
+    var activeItem = sheetFilmstrip.querySelector('.filmstrip-item.is-active');
+    if (activeItem) {
+      activeItem.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
     }
+  }
+
+  function updateSheetIncExc(isIncluded) {
+    sheetIncBtn.classList.toggle('is-active', isIncluded);
+    sheetExcBtn.classList.toggle('is-active', !isIncluded);
+  }
+
+  function updateOrientToggle(rotation) {
+    var isLandscape = rotation === 90 || rotation === 270;
+    orientBtns.forEach(function (btn) {
+      var rot = parseInt(btn.dataset.rot, 10);
+      var active = (rot === 0 && !isLandscape) || (rot === 90 && isLandscape);
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function applyPreviewOrientation(rotation) {
+    var isLandscape = rotation === 90 || rotation === 270;
+    // Switch paper frame between portrait and landscape aspect ratios
+    sheetPreviewPaper.classList.toggle('is-landscape', isLandscape);
+    // Apply CSS transform so users see the content rotated as it will print
+    if (isLandscape) {
+      // Scale down so the rotated portrait image fits inside the landscape frame
+      sheetPreviewImg.style.transform = 'rotate(' + rotation + 'deg) scale(0.72)';
+    } else if (rotation === 180) {
+      sheetPreviewImg.style.transform = 'rotate(180deg)';
+    } else {
+      sheetPreviewImg.style.transform = '';
+    }
+  }
+
+  sheetIncBtn.addEventListener('click', function () {
+    if (state._sheetFileId === null) return;
+    var pState = getPageState(state._sheetFileId, state._sheetPageIdx);
+    if (!pState) return;
+    pState.include = true;
+    updateSheetIncExc(true);
+    renderThumbnailStates();
     recalcPrice();
+  });
+
+  sheetExcBtn.addEventListener('click', function () {
+    if (state._sheetFileId === null) return;
+    var pState = getPageState(state._sheetFileId, state._sheetPageIdx);
+    if (!pState) return;
+    pState.include = false;
+    updateSheetIncExc(false);
+    renderThumbnailStates();
+    recalcPrice();
+  });
+
+  orientBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (state._sheetFileId === null) return;
+      var pState = getPageState(state._sheetFileId, state._sheetPageIdx);
+      if (!pState) return;
+      var deg = parseInt(btn.dataset.rot, 10);
+      pState.rotation = deg;
+      updateOrientToggle(deg);
+      applyPreviewOrientation(deg);
+      renderThumbnailStates();
+    });
+  });
+
+  sheetPrevBtn.addEventListener('click', function () { navigateSheet(-1); });
+  sheetNextBtn.addEventListener('click', function () { navigateSheet(1); });
+
+  // "Back to grid" — close viewer and restore the overlay
+  sheetBackBtn.addEventListener('click', function () {
+    closeSheet();
+    if (state._overlayWasOpen) {
+      state._overlayWasOpen = false;
+      openPagesOverlay();
+    }
+  });
+
+  // "Done" — close viewer and overlay completely
+  sheetDoneBtn.addEventListener('click', function () {
+    closeSheet();
+    state._overlayWasOpen = false;
+  });
+
+  // Swipe left/right to navigate between pages
+  var sheetTouchStartX = 0;
+  var sheetTouchStartY = 0;
+  bottomSheet.addEventListener('touchstart', function (e) {
+    sheetTouchStartX = e.touches[0].clientX;
+    sheetTouchStartY = e.touches[0].clientY;
+  }, { passive: true });
+  bottomSheet.addEventListener('touchend', function (e) {
+    var dx = e.changedTouches[0].clientX - sheetTouchStartX;
+    var dy = e.changedTouches[0].clientY - sheetTouchStartY;
+    // Only handle horizontal swipes (more horizontal than vertical)
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+      navigateSheet(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+
+  // ── Pages overlay ────────────────────────────────────────────────────────────
+
+  function openPagesOverlay() {
+    pagesGrid.scrollTop = 0;
+    pagesOverlay.classList.add('is-open');
+    pagesOverlay.setAttribute('aria-hidden', 'false');
+    pagesOverlayBack.classList.add('is-open');
+    document.body.style.overflow = 'hidden';
+
+    // Load all thumbnail images now — they were deferred until the overlay is visible
+    pagesGrid.querySelectorAll('img[data-src]').forEach(function (img) {
+      img.src = img.dataset.src;
+      delete img.dataset.src;
+    });
   }
 
-  document.querySelectorAll('.apply-range-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var fileId = parseInt(btn.dataset.fileId, 10);
-      var input  = document.querySelector('.page-range-input[data-file-id="' + fileId + '"]');
-      if (input) { applyPageRange(fileId, input.value); }
-    });
-  });
-  document.querySelectorAll('.page-range-input').forEach(function (input) {
-    input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') {
-        applyPageRange(parseInt(input.dataset.fileId, 10), input.value);
-      }
-    });
-  });
+  function closePagesOverlay() {
+    pagesOverlay.classList.remove('is-open');
+    pagesOverlay.setAttribute('aria-hidden', 'true');
+    pagesOverlayBack.classList.remove('is-open');
+    document.body.style.overflow = '';
+  }
 
-  // ── File section collapse/expand ─────────────────────────────────────────────
+  pagesPreviewBtn.addEventListener('click', openPagesOverlay);
+  pagesOverlayClose.addEventListener('click', closePagesOverlay);
+  pagesOverlayBack.addEventListener('click', closePagesOverlay);
 
-  document.querySelectorAll('.file-section-head').forEach(function (head) {
-    head.addEventListener('click', function () {
-      var section = head.closest('.file-section');
-      var isOpen  = section.classList.contains('is-open');
-      // Close all
-      document.querySelectorAll('.file-section').forEach(function (s) {
-        s.classList.remove('is-open');
-        s.querySelector('.file-section-head').setAttribute('aria-expanded', 'false');
+  // ── All / None toggle ─────────────────────────────────────────────────────────
+
+  if (pagesToggleAllBtn) {
+    pagesToggleAllBtn.addEventListener('click', function () {
+      // Always restores — button is only visible when pages are skipped
+      state.files.forEach(function (f) {
+        f.pages.forEach(function (p) { p.include = true; });
       });
-      // Toggle clicked
-      if (!isOpen) {
-        section.classList.add('is-open');
-        head.setAttribute('aria-expanded', 'true');
-      }
+      renderThumbnailStates();
+      recalcPrice();
     });
-    head.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); head.click(); }
-    });
-  });
+  }
 
   // ── Copies stepper ───────────────────────────────────────────────────────────
 
-  copiesInc.addEventListener('click', function () {
-    if (state.copies < 99) {
-      state.copies++;
-      copiesValue.textContent = state.copies;
-      copiesDec.disabled = false;
-      if (state.copies >= 99) { copiesInc.disabled = true; }
-      recalcPrice();
-    }
-  });
+  function updateCopiesUI() {
+    copiesValue.textContent    = state.copies;
+    copiesDec.disabled         = state.copies <= 1;
+    copiesInc.disabled         = state.copies >= 99;
+  }
+
   copiesDec.addEventListener('click', function () {
-    if (state.copies > 1) {
-      state.copies--;
-      copiesValue.textContent = state.copies;
-      copiesInc.disabled = false;
-      if (state.copies <= 1) { copiesDec.disabled = true; }
-      recalcPrice();
-    }
+    if (state.copies > 1) { state.copies--; updateCopiesUI(); recalcPrice(); }
   });
-  copiesDec.disabled = true; // Starts at 1
+
+  copiesInc.addEventListener('click', function () {
+    if (state.copies < 99) { state.copies++; updateCopiesUI(); recalcPrice(); }
+  });
+
+  // Tap-and-hold on + to increment continuously
+  var holdTimer = null;
+  var holdInterval = null;
+
+  function startHold() {
+    holdTimer = setTimeout(function () {
+      holdInterval = setInterval(function () {
+        if (state.copies < 99) { state.copies++; updateCopiesUI(); recalcPrice(); }
+        else { stopHold(); }
+      }, 100);
+    }, 500);
+  }
+
+  function stopHold() {
+    clearTimeout(holdTimer);
+    clearInterval(holdInterval);
+    holdTimer = null;
+    holdInterval = null;
+  }
+
+  copiesInc.addEventListener('mousedown',  startHold);
+  copiesInc.addEventListener('touchstart', startHold, { passive: true });
+  copiesInc.addEventListener('mouseup',    stopHold);
+  copiesInc.addEventListener('mouseleave', stopHold);
+  copiesInc.addEventListener('touchend',   stopHold);
 
   // ── Duplex toggle ────────────────────────────────────────────────────────────
 
@@ -571,231 +678,235 @@
     recalcPrice();
   });
 
-  // ── N-up radio group ──────────────────────────────────────────────────────────
+  // ── N-up layout selector ─────────────────────────────────────────────────────
 
-  document.querySelectorAll('input[name="nup"]').forEach(function (radio) {
-    radio.addEventListener('change', function () {
-      state.nup = parseInt(radio.value, 10);
+  layoutBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var nup = parseInt(btn.dataset.nup, 10);
+      state.nup = nup;
+      layoutBtns.forEach(function (b) {
+        b.classList.toggle('is-active', b === btn);
+        b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+      });
       recalcPrice();
     });
   });
 
-  // ── Coupon ───────────────────────────────────────────────────────────────────
+  // ── More options toggle ──────────────────────────────────────────────────────
 
-  function setCouponError(msg) {
-    couponErrorMsg.textContent = msg;
-    couponErrorMsg.style.display = msg ? '' : 'none';
-  }
-
-  couponApplyBtn.addEventListener('click', function () {
-    var code = couponInput.value.trim().toUpperCase();
-    if (!code) { setCouponError('Enter a coupon code.'); return; }
-    setCouponError('');
-    couponApplyBtn.disabled = true;
-
-    var origText = couponApplyBtn.textContent;
-    couponApplyBtn.textContent = '…';
-
-    fetch('/api/coupon/check?code=' + encodeURIComponent(code))
-      .then(function (res) { return res.json().then(function (d) { return { ok: res.ok, data: d }; }); })
-      .then(function (r) {
-        couponApplyBtn.disabled = false;
-        couponApplyBtn.textContent = origText;
-
-        if (!r.ok || !r.data.valid) {
-          setCouponError(r.data.message || 'Invalid coupon code.');
-          return;
-        }
-
-        state.coupon = { code: code, discount: r.data.balance };
-        couponInputRow.style.display    = 'none';
-        couponApplied.style.display     = '';
-        couponAppliedT.textContent      = 'Coupon "' + code + '" applied (−₹' + r.data.balance.toFixed(2) + ')';
-        recalcPrice();
-        if (typeof showToast === 'function') { showToast('Coupon applied!', 'success'); }
-      })
-      .catch(function () {
-        couponApplyBtn.disabled = false;
-        couponApplyBtn.textContent = origText;
-        setCouponError('Could not verify coupon. Try again.');
-      });
+  moreToggle.addEventListener('click', function () {
+    var isOpen = moreBody.classList.toggle('is-open');
+    moreToggle.classList.toggle('is-open', isOpen);
+    moreToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
   });
 
-  couponRemoveBtn.addEventListener('click', function () {
-    state.coupon = null;
-    couponInput.value = '';
-    couponApplied.style.display   = 'none';
-    couponInputRow.style.display  = '';
-    setCouponError('');
+  // ── Page range input ─────────────────────────────────────────────────────────
+
+  pageRangeInput.addEventListener('input', function () {
+    var raw = pageRangeInput.value.trim();
+    if (!raw) {
+      // Reset: include all pages
+      pageRangeError.style.display = 'none';
+      pageRangeInput.classList.remove('is-error');
+      state.files.forEach(function (f) {
+        f.pages.forEach(function (p) { p.include = true; });
+      });
+      renderThumbnailStates();
+      recalcPrice();
+      return;
+    }
+
+    // Parse range across all files in order
+    var totalPages = 0;
+    state.files.forEach(function (f) { totalPages += f.pageCount; });
+
+    var parsed = parsePageRange(raw, totalPages);
+    if (parsed === null) {
+      pageRangeError.style.display = '';
+      pageRangeInput.classList.add('is-error');
+      return;
+    }
+
+    pageRangeError.style.display = 'none';
+    pageRangeInput.classList.remove('is-error');
+
+    // Apply across files sequentially
+    var globalIdx = 0;
+    state.files.forEach(function (f) {
+      f.pages.forEach(function (p) {
+        // parsed is a Set of 0-based global indices
+        p.include = parsed.has(globalIdx);
+        globalIdx++;
+      });
+    });
+
+    renderThumbnailStates();
     recalcPrice();
   });
 
-  // Allow pressing Enter in coupon input
-  couponInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { couponApplyBtn.click(); }
+  /**
+   * Parse a page range string like "1-5, 8, 11-20" into a Set of 0-based indices.
+   * Returns null if the syntax is invalid.
+   * Pages are 1-indexed in the UI; we convert to 0-based internally.
+   */
+  function parsePageRange(str, maxPages) {
+    var result = new Set();
+    var parts  = str.split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i].trim();
+      if (!part) continue;
+      var rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+      var singleMatch = part.match(/^(\d+)$/);
+      if (rangeMatch) {
+        var from = parseInt(rangeMatch[1], 10) - 1;
+        var to   = parseInt(rangeMatch[2], 10) - 1;
+        if (from < 0 || to < from || to >= maxPages) return null;
+        for (var j = from; j <= to; j++) result.add(j);
+      } else if (singleMatch) {
+        var n = parseInt(singleMatch[1], 10) - 1;
+        if (n < 0 || n >= maxPages) return null;
+        result.add(n);
+      } else {
+        return null;
+      }
+    }
+    if (result.size === 0) return null;
+    return result;
+  }
+
+  // ── Coupon ───────────────────────────────────────────────────────────────────
+
+  couponInput.addEventListener('input', function () {
+    couponInput.value = couponInput.value.toUpperCase();
+    // Clear result when user edits
+    couponResult.style.display = 'none';
+    // If a coupon was applied, remove it when the code changes
+    if (state.coupon && couponInput.value !== state.coupon.code) {
+      state.coupon = null;
+      recalcPrice();
+    }
+  });
+
+  couponApplyBtn.addEventListener('click', function () {
+    var code = couponInput.value.trim();
+    if (!code) return;
+
+    couponResult.style.display = '';
+    couponResult.style.color   = 'var(--muted)';
+    couponResult.textContent   = 'Checking\u2026';
+    couponApplyBtn.disabled    = true;
+
+    fetch('/api/coupon/check', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ code: code, job_id: jobId }),
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.valid) {
+          state.coupon = { code: code, discount: data.discount };
+          couponResult.style.color = 'var(--success)';
+          couponResult.textContent = data.message;
+          recalcPrice();
+          // Notify mascot of the happy event
+          document.dispatchEvent(new CustomEvent('coupon-applied'));
+        } else {
+          state.coupon = null;
+          couponResult.style.color = 'var(--error)';
+          couponResult.textContent = data.message || 'Hmm, that code isn\'t valid. Double-check it and try again!';
+          recalcPrice();
+        }
+      })
+      .catch(function () {
+        couponResult.style.color = 'var(--error)';
+        couponResult.textContent = 'Hmm, we couldn\'t check that code. Try again in a moment.';
+      })
+      .finally(function () {
+        couponApplyBtn.disabled = false;
+      });
   });
 
   // ── Confirm & Pay ────────────────────────────────────────────────────────────
 
   confirmBtn.addEventListener('click', function () {
-    if (confirmBtn.disabled) { return; }
+    if (confirmBtn.disabled) return;
 
+    confirmBtn.classList.add('btn-loading');
     confirmBtn.disabled = true;
-    while (confirmBtn.firstChild) { confirmBtn.removeChild(confirmBtn.firstChild); }
-    var spinner = document.createElement('span');
-    spinner.className = 'spinner spinner-sm';
-    spinner.setAttribute('aria-hidden', 'true');
-    var label = document.createElement('span');
-    label.textContent = 'Creating order…';
-    confirmBtn.appendChild(spinner);
-    confirmBtn.appendChild(label);
-    confirmStatus.textContent = '';
 
-    var payload = {
-      job_id:     jobId,
-      files:      state.files.map(function (f) {
+    doConfirmRequest(null, function (data) {
+      if (data.status === 'free') {
+        window.location.href = data.redirect;
+        return;
+      }
+
+      if (data.order_id) {
+        window.location.href = '/payment?order_id=' + encodeURIComponent(data.order_id);
+      } else {
+        confirmBtn.classList.remove('btn-loading');
+        confirmBtn.disabled = false;
+        if (typeof showToast === 'function') showToast('Oops! Something hiccuped before payment — tap Confirm & Pay again.', 'error');
+      }
+    });
+  });
+
+  function doConfirmRequest(modal, onSuccess) {
+    var body = {
+      job_id:      jobId,
+      copies:      state.copies,
+      is_duplex:   state.isDuplex,
+      nup_layout:  state.nup,
+      coupon_code: state.coupon ? state.coupon.code : null,
+      files:       state.files.map(function (f) {
         return {
-          file_item_id: f.id,
-          page_configs: f.pages.map(function (p) {
-            return { page_idx: p.idx, rotation: p.rotation, include: p.include };
+          id:    f.id,
+          pages: f.pages.map(function (p) {
+            return { idx: p.idx, include: p.include, rotation: p.rotation };
           }),
         };
       }),
-      copies:     state.copies,
-      is_duplex:  state.isDuplex,
-      nup_layout: state.nup,
-      coupon_code: state.coupon ? state.coupon.code : null,
     };
 
     fetch('/api/settings/confirm', {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body:    JSON.stringify(body),
     })
       .then(function (res) {
-        return res.json().then(function (d) { return { ok: res.ok, data: d }; });
+        if (!res.ok) {
+          return res.json().then(function (err) {
+            throw new Error(err.detail || 'Confirm failed.');
+          });
+        }
+        return res.json();
       })
-      .then(function (r) {
-        if (!r.ok) {
-          resetConfirmBtn();
-          var msg = r.data.detail || 'Failed to create order. Please try again.';
-          confirmStatus.textContent = msg;
-          if (typeof showToast === 'function') { showToast(msg, 'error'); }
-          return;
-        }
-
-        var d = r.data;
-
-        // EDGE CASE: coupon fully covers cost — skip Razorpay
-        if (d.amount_paise === 0) {
-          confirmStatus.textContent = 'Free! Redirecting…';
-          setTimeout(function () {
-            window.location.href = '/success?job_id=' + encodeURIComponent(jobId);
-          }, 500);
-          return;
-        }
-
-        // Open Razorpay modal
-        openRazorpay(d);
+      .then(function (data) {
+        onSuccess(data);
       })
       .catch(function (err) {
-        resetConfirmBtn();
-        confirmStatus.textContent = 'Network error. Please try again.';
-        console.error('settings.js: confirm error', err);
+        confirmBtn.classList.remove('btn-loading');
+        confirmBtn.disabled = false;
+        var detail = err && err.message ? ' (' + err.message + ')' : '';
+        var msg = 'Something hiccuped! Please tap Confirm & Pay again.' + detail;
+        if (typeof showToast === 'function') showToast(msg, 'error');
       });
-  });
-
-  function resetConfirmBtn() {
-    confirmBtn.disabled = totalSelectedPages() === 0;
-    while (confirmBtn.firstChild) { confirmBtn.removeChild(confirmBtn.firstChild); }
-    var svg = document.createElement('span');
-    svg.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>';
-    var text = document.createElement('span');
-    text.textContent = 'Confirm & Pay';
-    confirmBtn.appendChild(svg.firstChild);
-    confirmBtn.appendChild(text);
   }
 
-  function openRazorpay(orderData) {
-    if (typeof Razorpay === 'undefined') {
-      // Razorpay JS not loaded — navigate to payment page as fallback
-      window.location.href = '/payment?job_id=' + encodeURIComponent(jobId);
-      return;
-    }
+  // ── State helpers ────────────────────────────────────────────────────────────
 
-    var options = {
-      key:         orderData.key_id,
-      amount:      orderData.amount_paise,
-      currency:    'INR',
-      name:        orderData.shop_name || 'PrintBot',
-      description: 'Print job',
-      order_id:    orderData.order_id,
-      image:       '/static/icons/printo_idle.png',
-      theme:       { color: '#E8820C' },
-      notes:       { job_id: jobId },
-      prefill:     { name: 'Guest', email: 'guest@printbot.local' },
+  function getFileState(fileId) {
+    return state.files.find(function (f) { return f.id === fileId; }) || null;
+  }
 
-      handler: function (response) {
-        confirmStatus.textContent = 'Payment received! Verifying…';
-
-        fetch('/verify-payment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            razorpay_payment_id: response.razorpay_payment_id,
-            razorpay_order_id:   response.razorpay_order_id,
-            razorpay_signature:  response.razorpay_signature,
-          }),
-        })
-          .then(function (res) { return res.json(); })
-          .then(function (data) {
-            if (data.redirect) {
-              confirmStatus.textContent = 'Redirecting…';
-              window.location.href = data.redirect;
-            } else {
-              window.location.href = '/success?job_id=' + encodeURIComponent(jobId);
-            }
-          })
-          .catch(function () {
-            // FALLBACK: navigate to success page regardless — webhook will catch it
-            window.location.href = '/success?job_id=' + encodeURIComponent(jobId);
-          });
-      },
-
-      modal: {
-        ondismiss: function () {
-          resetConfirmBtn();
-          confirmStatus.textContent = 'Payment cancelled.';
-        },
-      },
-    };
-
-    try {
-      var rzp = new Razorpay(options);
-      rzp.open();
-    } catch (e) {
-      console.error('settings.js: Razorpay init failed', e);
-      window.location.href = '/payment?job_id=' + encodeURIComponent(jobId);
-    }
+  function getPageState(fileId, pageIdx) {
+    var f = getFileState(fileId);
+    return f ? f.pages[pageIdx] || null : null;
   }
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
 
-  // Load Razorpay checkout script dynamically (not needed until confirm)
-  function loadRazorpay() {
-    if (typeof Razorpay !== 'undefined') { return; }
-    var s = document.createElement('script');
-    s.src = 'https://checkout.razorpay.com/v1/checkout.js';
-    document.head.appendChild(s);
-  }
-
-  // Initialise skeletons and observers for each file
-  state.files.forEach(function (fState) {
-    initSkeletons(fState.id, fState.pageCount);
-    attachObserver(fState.id, fState.pageCount);
-  });
-
+  buildPagesGrid();
+  updateCopiesUI();
   recalcPrice();
-  loadRazorpay();
 
-}());
+})();

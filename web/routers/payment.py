@@ -52,6 +52,15 @@ from web.dependencies import get_db, verify_job_cookie
 from web.services.job_service import mark_job_paid
 from web.services.razorpay_service import razorpay_service
 
+# Statuses that are valid to display on the success page
+_SUCCESS_STATUSES: frozenset[JobStatus] = frozenset({
+    JobStatus.PAID,
+    JobStatus.PROCESSING,
+    JobStatus.PRINTING,
+    JobStatus.COMPLETED,
+    JobStatus.FAILED,
+})
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -76,10 +85,10 @@ class VerifyPaymentRequest(BaseModel):
 
 # ── GET /payment/{order_id} ────────────────────────────────────────────────────
 
-@router.get("/payment/{order_id}", response_class=HTMLResponse)
+@router.get("/payment", response_class=HTMLResponse)
 async def payment_page(
     request: Request,
-    order_id: str,
+    order_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     pb_session: Optional[str] = Cookie(default=None, alias="pb_session"),
 ) -> HTMLResponse:
@@ -89,7 +98,13 @@ async def payment_page(
     The order_id in the URL is the Razorpay order ID stored on the PrintJob
     (razorpay_order_id), not the job's UUID.  This mirrors how the settings
     router issues the redirect: /payment?order_id=<razorpay_order_id>.
+
+    order_id is optional so that a bare /payment visit produces a friendly
+    redirect to / instead of a FastAPI 422 validation error.
     """
+    if not order_id:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+
     result = await db.execute(
         select(PrintJob).where(PrintJob.razorpay_order_id == order_id)
     )
@@ -134,9 +149,9 @@ async def payment_page(
         )
 
     return templates.TemplateResponse(
+        request,
         "payment.html",
         {
-            "request": request,
             "job_id": job.id,
             "order_id": order_id,
             "amount": job.total_cost,
@@ -228,3 +243,53 @@ async def verify_payment(
     )
 
     return {"status": "ok", "redirect": f"/success?job_id={job.id}"}
+
+
+# ── GET /success ───────────────────────────────────────────────────────────────
+
+_TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({
+    JobStatus.COMPLETED,
+    JobStatus.FAILED,
+})
+
+
+@router.get("/success", response_class=HTMLResponse)
+async def success_page(
+    request: Request,
+    job_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    """
+    Render the post-payment status page for a print job.
+
+    Loaded immediately after verify-payment redirects the browser here.
+    success.js then polls /jobs/{job_id}/status every 3 s to track progress.
+
+    job_id is optional so that a bare /success visit redirects home instead
+    of producing a FastAPI 422 validation error.  The pb_session cookie is
+    cleared once the job reaches a terminal state so the upload page no
+    longer shows a phantom "resume active job" warning.
+    """
+    if not job_id:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+
+    result = await db.execute(
+        select(PrintJob).where(PrintJob.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+
+    if job is None or job.status not in _SUCCESS_STATUSES:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+
+    response = templates.TemplateResponse(
+        request,
+        "success.html",
+        {
+            "job_id": job.id,
+            "status": job.status.value,
+            "shop_name": "PrintBot",
+        },
+    )
+    if job.status in _TERMINAL_STATUSES:
+        response.delete_cookie(settings.JOB_SESSION_COOKIE_NAME)
+    return response

@@ -27,6 +27,7 @@ import csv
 import hmac
 import io
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -218,9 +219,7 @@ async def admin_root() -> RedirectResponse:
 @router.get("/login")
 async def login_page(request: Request):
     """Serve the admin login page (pattern lock + PIN form)."""
-    return templates.TemplateResponse(
-        "admin/login.html", {"request": request}
-    )
+    return templates.TemplateResponse(request, "admin/login.html")
 
 
 @router.post("/login")
@@ -242,22 +241,36 @@ async def login(
     """
     ip = _get_client_ip(request)
 
+    def _render_login(
+        *,
+        error: Optional[str] = None,
+        lockout_until: Optional[str] = None,
+        http_status: int = 200,
+    ):
+        return templates.TemplateResponse(
+            request,
+            "admin/login.html",
+            {"error": error, "lockout_until": lockout_until},
+            status_code=http_status,
+        )
+
     # ── Brute-force gate ──────────────────────────────────────────────────────
     locked, remaining = _is_locked_out(ip)
     if locked:
         logger.warning("Admin login: blocked request from locked-out IP %s", ip)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many failed attempts. Try again in {remaining} seconds.",
+        lockout_dt = _login_attempts[ip]["lockout_until"]
+        return _render_login(
+            lockout_until=lockout_dt.isoformat(),
+            http_status=status.HTTP_429_TOO_MANY_REQUESTS,
         )
 
     # ── Credential validation ──────────────────────────────────────────────────
     # SECURITY: sanitise input length before comparison to prevent DoS via huge strings
     if len(credential) > 64:
         _record_failure(ip)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials.",
+        return _render_login(
+            error="Invalid credentials.",
+            http_status=status.HTTP_401_UNAUTHORIZED,
         )
 
     if not _credentials_match(credential):
@@ -267,9 +280,17 @@ async def login(
             "Admin login: failed attempt from %s (%d remaining)",
             ip, remaining_attempts,
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials.",
+        # If this failure triggered a lockout, show the lockout UI immediately
+        now_locked, _ = _is_locked_out(ip)
+        if now_locked:
+            lockout_dt = _login_attempts[ip]["lockout_until"]
+            return _render_login(
+                lockout_until=lockout_dt.isoformat(),
+                http_status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        return _render_login(
+            error="Invalid credentials.",
+            http_status=status.HTTP_401_UNAUTHORIZED,
         )
 
     # ── Create session ─────────────────────────────────────────────────────────
@@ -372,6 +393,16 @@ async def dashboard(
     )
     recent_jobs = list(recent_jobs_result.scalars().all())
 
+    # ── Retry eligibility (file existence check) ───────────────────────────────
+    # A failed job can only be retried if at least one of its processed files
+    # still exists on disk. If cleanup already ran, the button should be hidden.
+    can_retry_set: set[str] = {
+        job.id
+        for job in recent_jobs
+        if job.status == JobStatus.FAILED
+        and any(os.path.exists(f.effective_pdf_path()) for f in job.files)
+    }
+
     # ── Pricing rules ──────────────────────────────────────────────────────────
     pricing_result = await db.execute(
         select(PricingRule)
@@ -383,19 +414,56 @@ async def dashboard(
     # ── Queue status (no DB call needed) ──────────────────────────────────────
     queue_status = print_queue.get_queue_status()
 
+    # ── 7-day revenue chart data ───────────────────────────────────────────────
+    today = now.date()
+    chart_labels: list[str] = []
+    chart_data: list[float] = []
+    for offset in range(6, -1, -1):
+        day = today - timedelta(days=offset)
+        day_start = datetime(day.year, day.month, day.day, 0, 0, 0)
+        day_end = datetime(day.year, day.month, day.day, 23, 59, 59)
+        day_rev = await db.execute(
+            select(func.coalesce(func.sum(PrintJob.total_cost), 0.0)).where(
+                PrintJob.status.in_(_REVENUE_STATUSES),
+                PrintJob.created_at >= day_start,
+                PrintJob.created_at <= day_end,
+            )
+        )
+        chart_labels.append(day.strftime("%Y-%m-%d"))
+        chart_data.append(float(day_rev.scalar_one()))
+
+    # ── Serialise pricing rules to dicts (ORM objects aren't JSON-safe) ────────
+    pricing_rules_list = [
+        {
+            "id": r.id,
+            "min_pages": r.min_pages,
+            "max_pages": r.max_pages,
+            "is_duplex": r.is_duplex,
+            "price_per_page": r.price_per_page,
+            "description": r.description,
+            "is_active": r.is_active,
+        }
+        for r in pricing_rules
+    ]
+
     return templates.TemplateResponse(
+        request,
         "admin/dashboard.html",
         {
-            "request": request,
-            "today_revenue": today_revenue,
-            "today_jobs": today_jobs,
-            "total_jobs": total_all,
-            "total_completed": total_completed,
-            "success_rate": success_rate,
+            "stats": {
+                "today_revenue": today_revenue,
+                "total_jobs": total_all,
+                "success_rate": success_rate,
+                "active_job": queue_status["current_job"],
+            },
+            "revenue_chart": {"labels": chart_labels, "data": chart_data},
             "recent_jobs": recent_jobs,
-            "pricing_rules": pricing_rules,
-            "queue_status": queue_status,
-            "settings": settings,
+            "can_retry_set": can_retry_set,
+            "pricing_rules": pricing_rules_list,
+            "shop_name": "PrintBot",
+            "printer_name": settings.DEFAULT_PRINTER,
+            "tunnel_url": settings.TUNNEL_URL,
+            "now": now,
         },
     )
 
@@ -409,13 +477,27 @@ async def api_printer_status(
     """
     Return the current printer state and queue depth.
 
-    cups_manager.get_printer_status() is synchronous (pycups socket call) so
-    it is dispatched to the default executor to avoid blocking the event loop.
+    Returns both the user-friendly health summary (for dashboard widgets) and
+    the raw driver-level message (for admin diagnostics).  Both CUPS calls are
+    dispatched to the executor to avoid blocking the event loop.
     """
     loop = asyncio.get_event_loop()
-    printer_info = await loop.run_in_executor(None, cups_manager.get_printer_status)
+
+    def _get_both() -> tuple[dict, dict]:
+        return cups_manager.get_printer_status(), cups_manager.get_printer_health()
+
+    printer_raw, printer_health = await loop.run_in_executor(None, _get_both)
     queue_info = print_queue.get_queue_status()
-    return {"printer": printer_info, "queue": queue_info}
+    return {
+        "printer": printer_raw,
+        "printer_health": printer_health,
+        "queue": queue_info,
+        # Convenience fields for the dashboard JS widget:
+        "is_online": printer_health.get("online", False),
+        "status_text": printer_health.get("message", "Unavailable"),
+        "severity": printer_health.get("severity", "error"),
+        "driver_message": printer_raw.get("driver_message", ""),
+    }
 
 
 # ── API: Revenue chart ─────────────────────────────────────────────────────────
@@ -467,7 +549,11 @@ async def api_job_retry(
     Resets the job back to PAID (the state that the print worker expects when
     it dequeues a job) and clears the failure reason before enqueuing.
     """
-    result = await db.execute(select(PrintJob).where(PrintJob.id == job_id))
+    result = await db.execute(
+        select(PrintJob)
+        .options(selectinload(PrintJob.files))
+        .where(PrintJob.id == job_id)
+    )
     job = result.scalar_one_or_none()
 
     if job is None:
@@ -476,6 +562,13 @@ async def api_job_retry(
         raise HTTPException(
             status_code=400,
             detail=f"Only FAILED jobs can be retried (current status: {job.status.value}).",
+        )
+
+    # EDGE CASE: file cleanup may have already deleted the processed PDFs
+    if not any(os.path.exists(f.effective_pdf_path()) for f in job.files):
+        raise HTTPException(
+            status_code=409,
+            detail="File expired — cannot retry. User must re-upload.",
         )
 
     job.status = JobStatus.PAID

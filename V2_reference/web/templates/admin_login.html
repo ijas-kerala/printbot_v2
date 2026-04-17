@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="w-full flex flex-col items-center justify-center animate-in zoom-in duration-500">
+
+    <!-- Lock Icon / Mascot -->
+    <div class="mb-6 relative">
+        <div
+            class="w-20 h-20 bg-white shadow-xl rounded-full flex items-center justify-center text-brand-500 z-10 relative">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                stroke="currentColor" class="w-10 h-10">
+                <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+            </svg>
+        </div>
+        <div class="absolute inset-0 bg-brand-200 rounded-full animate-ping opacity-50 z-0"></div>
+    </div>
+
+    <!-- Error Alert -->
+    {% if request.query_params.get('error') %}
+    <div role="alert" class="alert alert-error shadow-lg w-full max-w-sm rounded-xl mb-6 flex animate-bounce-slight">
+        <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="font-bold text-sm">{{ request.query_params.get('error') }}</span>
+    </div>
+    {% endif %}
+
+    <div
+        class="card w-full max-w-sm glass-panel shadow-2xl rounded-3xl overflow-hidden relative border border-white/60">
+        <div class="card-body p-8 text-center">
+
+            <h2 class="text-2xl font-heading font-black text-slate-700 mb-2">Admin Access</h2>
+            <p class="text-slate-500 text-sm mb-6">Enter PIN or Pattern to unlock.</p>
+
+            <!-- PIN Form -->
+            <form action="/admin/login" method="post" class="space-y-4">
+                <div class="form-control">
+                    <input type="password" name="password" placeholder="Enter 4-Digit PIN"
+                        class="input input-lg w-full text-center tracking-[1em] font-heading font-bold text-slate-800 bg-white/70 focus:bg-white border-2 border-slate-200 focus:border-brand-500 rounded-xl"
+                        maxlength="4" pattern="[0-9]*" inputmode="numeric" required autofocus />
+                </div>
+
+                <button type="submit"
+                    class="btn btn-primary btn-lg w-full rounded-xl font-bold shadow-lg shadow-brand-500/30">
+                    Unlock Dashboard
+                </button>
+            </form>
+
+            <div class="divider text-xs text-slate-300 font-bold my-6">OR</div>
+
+            <!-- Pattern Form Mockup (Hidden actual implementation details for now, simpler UI focus) -->
+            <button class="btn btn-ghost btn-sm text-slate-400 hover:bg-slate-100 hover:text-slate-600 w-full"
+                onclick="alert('Pattern unlock feature coming soon! Use PIN: 1234')">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                    stroke="currentColor" class="w-4 h-4 mr-2">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                </svg>
+                Use Pattern
+            </button>
+
+        </div>
+    </div>
+
+    <p class="mt-8 text-xs text-slate-400 font-medium">Restricted Area • Authorized Personnel Only</p>
+
+</div>
+{% endblock %}

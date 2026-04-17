@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PrintBot</title>
+
+    <!-- Tailwind CSS & DaisyUI -->
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.0/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Fredoka:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Custom Tailwind Configuration -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        heading: ['Fredoka', 'cursive'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        },
+                        joy: {
+                            pink: '#FFD6E0',
+                            yellow: '#FFF5B8',
+                            green: '#D6FFDF',
+                            blue: '#D6F6FF',
+                            purple: '#E4D6FF'
+                        }
+                    },
+                    animation: {
+                        'float': 'float 6s ease-in-out infinite',
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'bounce-slight': 'bounce-slight 2s infinite',
+                    },
+                    keyframes: {
+                        float: {
+                            '0%, 100%': { transform: 'translateY(0)' },
+                            '50%': { transform: 'translateY(-10px)' },
+                        },
+                        'bounce-slight': {
+                            '0%, 100%': { transform: 'translateY(-5%)', animationTimingFunction: 'cubic-bezier(0.8,0,1,1)' },
+                            '50%': { transform: 'translateY(0)', animationTimingFunction: 'cubic-bezier(0,0,0.2,1)' },
+                        }
+                    }
+                }
+            },
+            daisyui: {
+                themes: [
+                    {
+                        light: {
+                            ...require("daisyui/src/theming/themes")["light"],
+                            "primary": "#0ea5e9", // Brand Blue
+                            "secondary": "#a855f7", // Brand Purple
+                            "accent": "#f43f5e", // Brand Pink
+                            "neutral": "#3d4451",
+                            "base-100": "#ffffff",
+                            "base-200": "#f8fafc", // Very soft gray/blue
+                            "base-300": "#f1f5f9",
+                        },
+                    },
+                ],
+            },
+        }
+    </script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
+            /* Slightly darker blue for contrast with white cards */
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        .font-heading {
+            font-family: 'Fredoka', cursive;
+        }
+
+        /* Glassmorphism utility - More opaque for better readability */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.90);
+            /* Increased opacity from 0.7 */
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.8);
+            box-shadow: 0 8px 32px rgba(31, 38, 135, 0.1);
+            /* Stronger shadow for separation */
+        }
+
+        /* Smooth inputs */
+        .input,
+        .select,
+        .range {
+            transition: all 0.2s ease;
+        }
+
+        .input:focus,
+        .select:focus {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(14, 165, 233, 0.2);
+        }
+
+        /* Hide scrollbar for cleaner mobile look */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #94a3b8;
+            /* Darker thumb */
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+
+        /* Mobile safe area */
+        .safe-area-bottom {
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+    </style>
+</head>
+
+<body class="flex flex-col min-h-screen text-slate-900 antialiased selection:bg-brand-200 selection:text-brand-900">
+
+    <!-- Background Elements (Deepened colors) -->
+    <div class="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none opacity-60">
+        <div
+            class="absolute top-[-10%] right-[-10%] w-96 h-96 bg-brand-300 rounded-full mix-blend-multiply filter blur-3xl opacity-70 animate-float">
+        </div>
+        <div class="absolute bottom-[-10%] left-[-10%] w-96 h-96 bg-joy-purple rounded-full mix-blend-multiply filter blur-3xl opacity-70 animate-float"
+            style="animation-delay: 2s"></div>
+        <div class="absolute top-[40%] left-[20%] w-72 h-72 bg-joy-pink rounded-full mix-blend-multiply filter blur-3xl opacity-70 animate-float"
+            style="animation-delay: 4s"></div>
+    </div>
+
+    <!-- Main Content Container -->
+    <main
+        class="flex-grow w-full max-w-lg mx-auto flex flex-col justify-center items-center p-4 sm:p-6 lg:p-8 relative z-10 safe-area-bottom">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer / Brand Mark -->
+    <footer class="text-center py-4 text-xs text-slate-400 font-medium relative z-10">
+        <p>PrintBot Machine • Made with ❤️</p>
+    </footer>
+
+</body>
+
+</html>

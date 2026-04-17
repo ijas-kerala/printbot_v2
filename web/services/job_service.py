@@ -15,6 +15,7 @@ Future additions (other modules will extend this):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -33,6 +34,13 @@ _POST_PAYMENT_STATUSES: frozenset[JobStatus] = frozenset({
     JobStatus.PRINTING,
     JobStatus.COMPLETED,
 })
+
+# Per-job asyncio locks to serialize concurrent mark_job_paid() calls.
+# Without this, verify-payment and the Razorpay webhook can both read
+# PAYMENT_PENDING before either commits, pass the idempotency check, and
+# enqueue the same job twice — causing a double print.
+# asyncio is single-threaded so Lock() is sufficient (no threading.Lock needed).
+_payment_locks: dict[str, asyncio.Lock] = {}
 
 
 async def mark_job_paid(
@@ -62,6 +70,10 @@ async def mark_job_paid(
         False — job was already in a post-payment status; nothing changed.
 
     Notes:
+        - A per-job asyncio.Lock serializes concurrent callers so that the
+          verify-payment route and the Razorpay webhook cannot both pass the
+          idempotency check at the same time.  Inside the lock, db.refresh()
+          re-reads the latest committed status from the DB.
         - An explicit db.commit() is issued inside this function so that the
           PAID status is durably persisted before the print queue is notified.
           The caller's get_db() session will auto-commit on exit; the second
@@ -70,50 +82,62 @@ async def mark_job_paid(
           Module 7 (print_queue.py) is built.  The FALLBACK comment marks where
           the job would be missed if the queue is unavailable.
     """
-    # ── Idempotency check ──────────────────────────────────────────────────────
-    if job.status in _POST_PAYMENT_STATUSES:
+    # Acquire per-job lock: only one coroutine can mark this job paid at a time.
+    # setdefault is atomic in CPython's GIL, so two concurrent callers always
+    # get the same Lock object for the same job_id.
+    lock = _payment_locks.setdefault(job.id, asyncio.Lock())
+
+    async with lock:
+        # ── Re-read from DB inside the lock ───────────────────────────────────
+        # If another caller (e.g. the webhook) already committed PAID between
+        # the caller's initial SELECT and now, db.refresh() will surface that
+        # and the idempotency check below will short-circuit.
+        await db.refresh(job)
+
+        # ── Idempotency check ─────────────────────────────────────────────────
+        if job.status in _POST_PAYMENT_STATUSES:
+            logger.info(
+                "mark_job_paid [%s]: job %s already in '%s', skipping",
+                source, job.id, job.status.value,
+            )
+            return False
+
+        # ── Transition to PAID ────────────────────────────────────────────────
+        job.status = JobStatus.PAID
+        job.paid_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        if payment_id:
+            job.razorpay_payment_id = payment_id
+
+        # Commit before enqueue: if the server crashes between these two steps
+        # the startup requeue sweep will re-enqueue any PAID jobs found in DB.
+        await db.commit()
+
         logger.info(
-            "mark_job_paid [%s]: job %s already in '%s', skipping",
-            source, job.id, job.status.value,
-        )
-        return False
-
-    # ── Transition to PAID ────────────────────────────────────────────────────
-    job.status = JobStatus.PAID
-    job.paid_at = datetime.now(timezone.utc).replace(tzinfo=None)
-
-    if payment_id:
-        job.razorpay_payment_id = payment_id
-
-    # Commit before enqueue: if the server crashes between these two steps the
-    # startup requeue sweep (Module 7) will re-enqueue any PAID jobs found in DB.
-    await db.commit()
-
-    logger.info(
-        "mark_job_paid [%s]: job %s → PAID (payment_id=%s)",
-        source, job.id, payment_id or "n/a",
-    )
-
-    # ── Enqueue for printing ───────────────────────────────────────────────────
-    try:
-        from web.services.print_queue import print_queue  # noqa: PLC0415
-
-        await print_queue.enqueue(job.id)
-        logger.info("mark_job_paid [%s]: job %s enqueued", source, job.id)
-    except ImportError:
-        # FALLBACK: print_queue not yet wired (Module 7). The job is durably
-        # PAID in the DB; the startup requeue sweep will pick it up on restart.
-        logger.warning(
-            "mark_job_paid [%s]: print_queue not available — job %s is PAID but "
-            "not yet enqueued (will be picked up on next restart)",
-            source, job.id,
-        )
-    except Exception as exc:
-        # EDGE CASE: queue is initialised but enqueue raised (e.g. queue full).
-        # Job is already PAID in DB — log and let the startup sweep recover it.
-        logger.error(
-            "mark_job_paid [%s]: enqueue failed for job %s: %s",
-            source, job.id, exc,
+            "mark_job_paid [%s]: job %s → PAID (payment_id=%s)",
+            source, job.id, payment_id or "n/a",
         )
 
-    return True
+        # ── Enqueue for printing ───────────────────────────────────────────────
+        try:
+            from web.services.print_queue import print_queue  # noqa: PLC0415
+
+            await print_queue.enqueue(job.id)
+            logger.info("mark_job_paid [%s]: job %s enqueued", source, job.id)
+        except ImportError:
+            # FALLBACK: print_queue not yet wired (Module 7). The job is durably
+            # PAID in the DB; the startup requeue sweep will pick it up on restart.
+            logger.warning(
+                "mark_job_paid [%s]: print_queue not available — job %s is PAID but "
+                "not yet enqueued (will be picked up on next restart)",
+                source, job.id,
+            )
+        except Exception as exc:
+            # EDGE CASE: queue is initialised but enqueue raised (e.g. queue full).
+            # Job is already PAID in DB — log and let the startup sweep recover it.
+            logger.error(
+                "mark_job_paid [%s]: enqueue failed for job %s: %s",
+                source, job.id, exc,
+            )
+
+        return True

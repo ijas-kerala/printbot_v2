@@ -109,6 +109,9 @@ class PrintJob(Base):
     cups_job_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     failed_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Live printer/driver note written by the queue worker during PRINTING so the
+    # status API can surface it to users without a separate CUPS call per poll.
+    printer_note: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
     # ── Relations ─────────────────────────────────────────────────────────────
     files: Mapped[list[FileItem]] = relationship(

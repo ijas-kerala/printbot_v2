@@ -13,7 +13,7 @@
     revenue_chart — list of {date, revenue} for 7 days
 #}
 
-{% block title %}Admin Dashboard — PrintBot{% endblock %}
+{% block title %}PrintBot Admin{% endblock %}
 
 {% block head_extra %}
 {# Chart.js for 7-day revenue chart #}
@@ -47,14 +47,14 @@
     letter-spacing: -0.03em;
     margin: 0;
   }
-  .admin-wordmark span { color: var(--saffron); }
+  .admin-wordmark span { color: var(--accent); }
   .admin-role-badge {
     font-size: 0.6875rem;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     background: var(--ink);
-    color: var(--saffron);
+    color: var(--accent);
     padding: 0.2rem 0.625rem;
     border-radius: var(--radius-sm);
   }
@@ -87,11 +87,11 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .printer-status-dot.online  { background: var(--forest); }
-  .printer-status-dot.offline { background: var(--coral); }
-  .printer-status-dot.unknown { background: var(--mist); }
+  .printer-status-dot.online  { background: var(--success); }
+  .printer-status-dot.offline { background: var(--error); }
+  .printer-status-dot.unknown { background: var(--muted); }
   .printer-status-dot.checking {
-    background: var(--saffron);
+    background: var(--accent);
     animation: blink 1s ease infinite;
   }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -159,7 +159,7 @@
   }
   .settings-row-value {
     font-size: 0.875rem;
-    color: var(--mist);
+    color: var(--muted);
     font-family: 'Courier New', monospace;
     word-break: break-all;
   }
@@ -195,8 +195,10 @@
       <span class="admin-role-badge">Admin</span>
     </div>
     <div style="display:flex; align-items:center; gap:0.75rem;">
-      <span style="font-size:0.8125rem; color:var(--mist);">{{ shop_name }}</span>
-      <a href="/admin/logout" class="btn btn-secondary btn-sm">Logout</a>
+      <span style="font-size:0.8125rem; color:var(--muted);">{{ shop_name }}</span>
+      <form method="POST" action="/admin/logout" style="display:inline;">
+        <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+      </form>
     </div>
   </div>
 
@@ -223,7 +225,7 @@
         {% if stats.active_job %}
           <span class="badge badge-printing">Printing</span>
         {% else %}
-          <span style="font-size:1.5rem; color:var(--forest);">—</span>
+          <span style="font-size:1.5rem; color:var(--success);">—</span>
         {% endif %}
       </span>
       <span class="stat-sub">currently printing</span>
@@ -237,9 +239,10 @@
       <div style="font-size:0.875rem; font-weight:600; color:var(--ink);">
         {{ printer_name or 'No printer configured' }}
       </div>
-      <div style="font-size:0.75rem; color:var(--mist);" id="printer-status-text">Checking…</div>
+      <div style="font-size:0.75rem; color:var(--muted);" id="printer-status-text">Checking…</div>
+      <code style="font-family:var(--font-mono);font-size:11px;color:var(--muted);" id="printer-raw-cups"></code>
     </div>
-    <div style="margin-left:auto; font-size:0.75rem; color:var(--mist);" id="printer-last-check"></div>
+    <div style="margin-left:auto; font-size:0.75rem; color:var(--muted);" id="printer-last-check"></div>
   </div>
 
   {# ── 7-day revenue chart ───────────────────────────────────────────────── #}
@@ -271,7 +274,7 @@
       </select>
       <input type="text" class="input" id="job-search" placeholder="Search by ID or file…"
              style="width:auto; flex:1; min-width:160px; padding:0.5rem 0.75rem;">
-      <span style="font-size:0.8125rem; color:var(--mist); margin-left:auto;" id="job-count-label"></span>
+      <span style="font-size:0.8125rem; color:var(--muted); margin-left:auto;" id="job-count-label"></span>
     </div>
 
     <div class="table-wrap">
@@ -292,11 +295,11 @@
             {% for job in recent_jobs %}
             <tr data-job-id="{{ job.id }}" data-status="{{ job.status }}">
               <td>
-                <span style="font-family:'Courier New',monospace; font-size:0.75rem; color:var(--mist);">
+                <span style="font-family:'Courier New',monospace; font-size:0.75rem; color:var(--muted);">
                   {{ job.id[:8] | upper }}
                 </span>
               </td>
-              <td style="white-space:nowrap; font-size:0.8125rem; color:var(--mist);">
+              <td style="white-space:nowrap; font-size:0.8125rem; color:var(--muted);">
                 {{ job.created_at.strftime('%d %b %H:%M') if job.created_at else '—' }}
               </td>
               <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.8125rem;">
@@ -314,8 +317,12 @@
               </td>
               <td style="white-space:nowrap;">
                 {% if job.status == 'failed' %}
-                <button type="button" class="btn btn-sm btn-secondary retry-btn"
-                        data-job-id="{{ job.id }}" style="margin-right:0.375rem;">Retry</button>
+                  {% if job.id in can_retry_set %}
+                  <button type="button" class="btn btn-sm btn-secondary retry-btn"
+                          data-job-id="{{ job.id }}" style="margin-right:0.375rem;">Retry</button>
+                  {% else %}
+                  <span class="badge" style="color:var(--muted);background:var(--cream);border:1px solid var(--border);">File expired</span>
+                  {% endif %}
                 {% endif %}
                 {% if job.status in ['paid', 'processing', 'payment_pending'] %}
                 <button type="button" class="btn btn-sm btn-danger cancel-btn"
@@ -325,7 +332,7 @@
             </tr>
             {% else %}
             <tr>
-              <td colspan="7" style="text-align:center; padding:2rem; color:var(--mist);">
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--muted);">
                 No jobs yet.
               </td>
             </tr>
@@ -347,7 +354,7 @@
     <div class="table-wrap" style="margin-bottom:1.5rem;">
       <div style="padding:0.875rem 1.125rem; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
         <span style="font-family:var(--font-head); font-weight:700; font-size:0.9375rem;">Pricing Rules</span>
-        <span style="font-size:0.75rem; color:var(--mist);">Rules are matched in order — first match wins</span>
+        <span style="font-size:0.75rem; color:var(--muted);">Rules are matched in order — first match wins</span>
       </div>
       <div class="table-scroll">
         <table class="data-table">
@@ -373,7 +380,7 @@
                 </span>
               </td>
               <td style="font-weight:700;">₹{{ "%.2f"|format(rule.price_per_page) }}</td>
-              <td style="font-size:0.8125rem; color:var(--mist);">{{ rule.description or '—' }}</td>
+              <td style="font-size:0.8125rem; color:var(--muted);">{{ rule.description or '—' }}</td>
               <td>
                 <label class="toggle" style="width:36px; height:22px;">
                   <input type="checkbox" class="rule-active-toggle" data-rule-id="{{ rule.id }}"
@@ -383,7 +390,7 @@
               </td>
               <td>
                 <button type="button" class="btn btn-ghost btn-sm delete-rule-btn"
-                        data-rule-id="{{ rule.id }}" style="color:var(--coral);">
+                        data-rule-id="{{ rule.id }}" style="color:var(--error);">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
                   </svg>
@@ -392,7 +399,7 @@
             </tr>
             {% else %}
             <tr>
-              <td colspan="7" style="text-align:center; padding:2rem; color:var(--mist);">
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--muted);">
                 No pricing rules. Add one below.
               </td>
             </tr>
@@ -496,7 +503,7 @@
             </a>
           </div>
         </div>
-        <p style="font-size:0.8125rem; color:var(--mist);">
+        <p style="font-size:0.8125rem; color:var(--muted);">
           Downloads all jobs for the selected month as a comma-separated file. Large exports are streamed.
         </p>
       </div>
@@ -557,7 +564,7 @@
             </thead>
             <tbody id="coupons-tbody">
               <tr>
-                <td colspan="4" style="text-align:center; padding:1.5rem; color:var(--mist);" id="coupons-loading">
+                <td colspan="4" style="text-align:center; padding:1.5rem; color:var(--muted);" id="coupons-loading">
                   Loading…
                 </td>
               </tr>
@@ -572,7 +579,7 @@
             <input type="number" id="coupon-amount" class="input" placeholder="50.00" min="0.01" step="0.50" style="width:120px;">
           </div>
           <button type="button" class="btn btn-secondary" id="create-coupon-btn">Create Coupon</button>
-          <span id="coupon-create-result" style="font-size:0.875rem; color:var(--forest); align-self:flex-end; min-height:36px; display:flex; align-items:center;"></span>
+          <span id="coupon-create-result" style="font-size:0.875rem; color:var(--success); align-self:flex-end; min-height:36px; display:flex; align-items:center;"></span>
         </div>
       </div>
     </div>

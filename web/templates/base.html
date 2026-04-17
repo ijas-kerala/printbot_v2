@@ -1,23 +1,21 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="{% block html_class %}{% endblock %}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#E8820C">
+  <meta name="theme-color" content="#C2410C">
   <title>{% block title %}PrintBot{% endblock %}</title>
 
-  <!-- Tailwind CDN (utilities only — custom design via app.css variables) -->
-  <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- PrintBot design system: custom components, layout helpers -->
-  <link rel="stylesheet" href="/static/css/app.css">
-
-  <!-- Google Fonts: Syne (headings) + DM Sans (body) -->
+  <!-- Google Fonts: Syne (headings) + DM Sans (body) + JetBrains Mono (codes) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;1,9..40,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 
-  <!-- Tailwind theme extension: wire up CSS variables as Tailwind colours -->
+  <!-- PrintBot design system -->
+  <link rel="stylesheet" href="/static/css/app.css">
+
+  <!-- Tailwind CDN utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -25,28 +23,33 @@
           fontFamily: {
             head: ['Syne', 'sans-serif'],
             body: ['DM Sans', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
           },
           colors: {
-            ink:        '#1A1A2E',
-            paper:      '#F5F0EB',
-            cream:      '#EDE8E1',
-            saffron:    '#E8820C',
-            'saffron-light': '#FDF0E0',
-            coral:      '#D94F3D',
-            forest:     '#2D6A4F',
-            mist:       '#6B7280',
-            border:     '#D5CEC5',
+            ink:           '#1C1917',
+            paper:         '#FAFAF8',
+            cream:         '#F0EDE8',
+            border:        '#E2DDD7',
+            muted:         '#78716C',
+            accent:        '#C2410C',
+            'accent-light':'#FEF3EB',
+            'accent-hover':'#9A3412',
+            success:       '#15803D',
+            'success-bg':  '#F0FDF4',
+            error:         '#B91C1C',
+            'error-bg':    '#FEF2F2',
+            warning:       '#B45309',
+            'warning-bg':  '#FFFBEB',
           },
           borderRadius: {
             sm: '6px',
-            md: '12px',
-            lg: '20px',
-            xl: '28px',
+            md: '8px',
+            lg: '12px',
+            xl: '16px',
           },
           boxShadow: {
-            sm:  '0 1px 3px rgba(26,26,46,0.08)',
-            md:  '0 4px 12px rgba(26,26,46,0.10)',
-            lg:  '0 8px 24px rgba(26,26,46,0.12)',
+            sm: '0 1px 3px rgba(28,25,23,0.08)',
+            md: '0 4px 12px rgba(28,25,23,0.10)',
           },
         }
       }
@@ -54,142 +57,201 @@
   </script>
 
   <style>
-    /* ── CSS Design Tokens ──────────────────────────────────────────────────── */
+    /* CSS variables made available to inline styles and Tailwind arbitrary values */
     :root {
-      --ink:           #1A1A2E;
-      --paper:         #F5F0EB;
-      --cream:         #EDE8E1;
-      --saffron:       #E8820C;
-      --saffron-light: #FDF0E0;
-      --coral:         #D94F3D;
-      --forest:        #2D6A4F;
-      --mist:          #6B7280;
-      --border:        #D5CEC5;
+      --ink:          #1C1917;
+      --paper:        #FAFAF8;
+      --cream:        #F0EDE8;
+      --border:       #E2DDD7;
+      --muted:        #78716C;
+      --accent:       #C2410C;
+      --accent-light: #FEF3EB;
+      --accent-hover: #9A3412;
+      --success:      #15803D;
+      --success-bg:   #F0FDF4;
+      --error:        #B91C1C;
+      --error-bg:     #FEF2F2;
+      --warning:      #B45309;
+      --warning-bg:   #FFFBEB;
+      --kiosk-bg:     #111827;
+      --kiosk-text:   #F9FAFB;
 
       --font-head: 'Syne', sans-serif;
       --font-body: 'DM Sans', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
 
       --radius-sm: 6px;
-      --radius-md: 12px;
-      --radius-lg: 20px;
-      --radius-xl: 28px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --radius-xl: 16px;
 
-      --shadow-sm: 0 1px 3px rgba(26,26,46,0.08);
-      --shadow-md: 0 4px 12px rgba(26,26,46,0.10);
-      --shadow-lg: 0 8px 24px rgba(26,26,46,0.12);
-    }
-
-    /* ── Base reset ─────────────────────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; }
-
-    html { -webkit-tap-highlight-color: transparent; }
-
-    body {
-      font-family: var(--font-body);
-      background-color: var(--paper);
-      color: var(--ink);
-      min-height: 100dvh;
-      min-height: 100vh;
-      overflow-x: hidden;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    h1, h2, h3, h4, h5, h6 {
-      font-family: var(--font-head);
-    }
-
-    /* ── Scrollbar ──────────────────────────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--mist); }
-
-    /* ── Toast notifications ────────────────────────────────────────────────── */
-    #toast-container {
-      position: fixed;
-      bottom: 1.5rem;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 9999;
-      display: flex;
-      flex-direction: column-reverse;
-      gap: 0.5rem;
-      pointer-events: none;
-      width: min(calc(100vw - 2rem), 420px);
-    }
-
-    .toast {
-      padding: 0.75rem 1rem;
-      border-radius: var(--radius-md);
-      font-family: var(--font-body);
-      font-size: 0.875rem;
-      font-weight: 500;
-      box-shadow: var(--shadow-md);
-      pointer-events: auto;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      animation: toast-in 0.25s ease;
-    }
-    .toast-info    { background: var(--ink);    color: var(--paper); }
-    .toast-success { background: var(--forest); color: #fff; }
-    .toast-error   { background: var(--coral);  color: #fff; }
-    .toast-warning { background: var(--saffron); color: #fff; }
-
-    @keyframes toast-in {
-      from { opacity: 0; transform: translateY(8px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* ── Kiosk mode overrides ───────────────────────────────────────────────── */
-    .kiosk-mode {
-      --paper: #0F0F1A;
-      --ink:   #F5F0EB;
+      --shadow-sm: 0 1px 3px rgba(28,25,23,0.08);
+      --shadow-md: 0 4px 12px rgba(28,25,23,0.10);
     }
   </style>
 
   {% block head_extra %}{% endblock %}
+
+  <!-- Mascot state utility — loaded early so any inline script can call setMascotState() -->
+  <script src="/static/js/mascot.js"></script>
 </head>
 
-<body class="flex flex-col min-h-screen">
+{# ─────────────────────────────────────────────────────────────────────────── #}
+{# Jinja2 macros                                                               #}
+{# ─────────────────────────────────────────────────────────────────────────── #}
+
+{# Mascot — "Printo"
+   A printer-shaped fun robot with big Clippy-style expressive eyes.
+   state: 'idle' | 'working' | 'happy' | 'sad' | 'waiting'
+   size:  'sm' (48px) | 'md' (80px) | 'lg' (120px)
+   id:    optional DOM id for JS targeting
+#}
+{% macro mascot(state='idle', size='md', id='page-mascot') %}
+<svg class="dot-mascot dot-{{ state }}"
+     id="{{ id }}"
+     xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 80 96"
+     role="img"
+     aria-label="Printo the PrintBot mascot"
+     style="width:{% if size == 'sm' %}48px{% elif size == 'lg' %}120px{% else %}80px{% endif %};height:auto;display:block;">
+  <g class="dot-body">
+
+    {# ── Paper strips coming out of top (animate in "working" state) ── #}
+    <g class="dot-leg-left">
+      <rect x="19" y="0" width="15" height="23" rx="1.5" fill="white" stroke="#D6D0C8" stroke-width="1"/>
+      <line x1="22" y1="5"  x2="31" y2="5"  stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="22" y1="9"  x2="31" y2="9"  stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="22" y1="13" x2="31" y2="13" stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="22" y1="17" x2="31" y2="17" stroke="#E2DDD7" stroke-width="0.8"/>
+    </g>
+    <g class="dot-leg-right">
+      <rect x="46" y="0" width="15" height="23" rx="1.5" fill="white" stroke="#D6D0C8" stroke-width="1"/>
+      <line x1="49" y1="5"  x2="58" y2="5"  stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="49" y1="9"  x2="58" y2="9"  stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="49" y1="13" x2="58" y2="13" stroke="#E2DDD7" stroke-width="0.8"/>
+      <line x1="49" y1="17" x2="58" y2="17" stroke="#E2DDD7" stroke-width="0.8"/>
+    </g>
+
+    {# ── Printer main body ── #}
+    <rect class="dot-head" x="2" y="16" width="76" height="66" rx="8" fill="var(--ink)"/>
+
+    {# Top edge highlight #}
+    <rect x="2" y="16" width="76" height="4" rx="8" fill="white" opacity="0.06"/>
+
+    {# Paper output slot at top of body #}
+    <rect x="17" y="16" width="46" height="9" rx="1" fill="#111" opacity="0.55"/>
+
+    {# Side vent lines (detail) #}
+    <rect x="3"  y="38" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+    <rect x="3"  y="42" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+    <rect x="3"  y="46" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+    <rect x="72" y="38" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+    <rect x="72" y="42" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+    <rect x="72" y="46" width="5" height="1.5" rx="0.75" fill="white" opacity="0.12"/>
+
+    {# ── Face display panel ── #}
+    <rect class="dot-face-panel" x="7" y="27" width="66" height="42" rx="5" fill="#2A2723"/>
+
+    {# ── Eyes — big Clippy-style ── #}
+    <circle class="dot-eye-left"  cx="25" cy="44" r="10.5" fill="white"/>
+    <circle class="dot-eye-right" cx="55" cy="44" r="10.5" fill="white"/>
+
+    {# Pupils #}
+    <circle class="dot-pupil-left"  cx="27" cy="46" r="5.5" fill="var(--ink)"/>
+    <circle class="dot-pupil-right" cx="57" cy="46" r="5.5" fill="var(--ink)"/>
+
+    {# Inner iris ring (personality detail) #}
+    <circle cx="27" cy="46" r="3" fill="none" stroke="var(--ink)" stroke-width="0.5" opacity="0.25"/>
+    <circle cx="57" cy="46" r="3" fill="none" stroke="var(--ink)" stroke-width="0.5" opacity="0.25"/>
+
+    {# Eye highlights — Clippy-like sparkle #}
+    <circle cx="20" cy="39" r="2.5" fill="white" opacity="0.85"/>
+    <circle cx="50" cy="39" r="2.5" fill="white" opacity="0.85"/>
+
+    {# ── Eyebrows — for expression ── #}
+    <rect class="dot-eyebrow-left"  x="17" y="31" width="14" height="2.5" rx="1.25" fill="white" opacity="0.8"/>
+    <rect class="dot-eyebrow-right" x="49" y="31" width="14" height="2.5" rx="1.25" fill="white" opacity="0.8"/>
+
+    {# ── Mouth ── #}
+    <path class="dot-mouth"
+          d="M 21 60 Q 40 69 59 60"
+          stroke="white" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+
+    {# ── Control strip below face ── #}
+    <rect x="7" y="71" width="66" height="9" rx="3" fill="black" opacity="0.3"/>
+
+    {# Status LED (accent color) #}
+    <circle class="dot-status-led" cx="40" cy="75.5" r="2.8" fill="var(--accent)" opacity="0.9"/>
+
+    {# Small button dots beside LED #}
+    <circle cx="32" cy="75.5" r="1.5" fill="white" opacity="0.2"/>
+    <circle cx="48" cy="75.5" r="1.5" fill="white" opacity="0.2"/>
+
+    {# ── Feet / base ── #}
+    <rect x="9"  y="82" width="20" height="14" rx="5" fill="#2A2723"/>
+    <rect x="51" y="82" width="20" height="14" rx="5" fill="#2A2723"/>
+
+    {# Foot shine #}
+    <rect x="11" y="83" width="7"  height="2" rx="1" fill="white" opacity="0.1"/>
+    <rect x="53" y="83" width="7"  height="2" rx="1" fill="white" opacity="0.1"/>
+
+  </g>
+</svg>
+{% endmacro %}
+
+{# Flow step indicator — 4-node visual progress track
+   current: 1 = Upload, 2 = Settings, 3 = Payment, 4 = Done
+#}
+{% macro step_indicator(current) %}
+{% set steps = [('Upload', 1), ('Settings', 2), ('Payment', 3), ('Done', 4)] %}
+<nav class="flow-steps" aria-label="Progress">
+  {% for label, num in steps %}
+    {% set is_done = num < current %}
+    {% set is_current = num == current %}
+    <div class="flow-step{% if is_done %} is-done{% elif is_current %} is-current{% endif %}"
+         aria-current="{% if is_current %}step{% else %}false{% endif %}">
+      <div class="flow-step-dot">
+        {% if is_done %}
+          <svg class="flow-step-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+        {% else %}
+          {{ num }}
+        {% endif %}
+      </div>
+      <span class="flow-step-label">{{ label }}</span>
+    </div>
+  {% endfor %}
+</nav>
+{% endmacro %}
+
+<body>
 
   {% block body_start %}{% endblock %}
 
-  <!-- Main content region -->
-  <main class="flex-1 w-full max-w-lg mx-auto flex flex-col justify-center px-4 py-6">
+  <main class="w-full max-w-lg mx-auto px-4 py-6 flex flex-col min-h-screen">
     {% block content %}{% endblock %}
   </main>
 
-  <!-- Footer -->
-  <footer class="text-center py-4 text-xs" style="color: var(--mist);">
-    <p style="font-family: var(--font-body);">PrintBot &mdash; Self-service print</p>
-  </footer>
-
-  <!-- Toast container -->
+  <!-- Toast container — populated by showToast() in toast.js -->
   <div id="toast-container" role="status" aria-live="polite"></div>
 
-  <!-- Toast helper: showToast(message, type) available globally -->
-  <script>
-    (function () {
-      const container = document.getElementById('toast-container');
-
-      window.showToast = function (message, type) {
-        type = type || 'info';
-        const el = document.createElement('div');
-        el.className = 'toast toast-' + type;
-        // Use textContent — never innerHTML for user messages
-        el.textContent = message;
-        container.appendChild(el);
-        setTimeout(function () {
-          el.style.transition = 'opacity 0.3s';
-          el.style.opacity = '0';
-          setTimeout(function () { el.remove(); }, 320);
-        }, 3000);
-      };
-    }());
-  </script>
+  <script src="/static/js/toast.js" defer></script>
 
   {% block scripts %}{% endblock %}
 
+  <!-- Button micro-interaction: pulse on click for all primary buttons -->
+  <script>
+    (function () {
+      document.addEventListener('pointerdown', function (e) {
+        var btn = e.target.closest('.btn-primary, .cta-btn, .pay-btn');
+        if (!btn || btn.disabled) return;
+        btn.classList.remove('btn-clicked');
+        void btn.offsetWidth; // reflow to restart animation
+        btn.classList.add('btn-clicked');
+        btn.addEventListener('animationend', function () {
+          btn.classList.remove('btn-clicked');
+        }, { once: true });
+      });
+    }());
+  </script>
 </body>
 </html>

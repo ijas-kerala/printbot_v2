@@ -46,6 +46,47 @@ _PRINTER_STATE_LABELS: dict[int, str] = {
 # Printer states that indicate the printer can accept jobs
 _ONLINE_PRINTER_STATES: frozenset[int] = frozenset({3, 4})
 
+# ── IPP printer-state-reasons → (user message, severity) ──────────────────────
+# Severity order for priority: error > warning > ok
+# Printers that don't report these keywords just won't match any entry here,
+# which resolves gracefully to "Ready" / "ok".
+_REASON_MESSAGES: dict[str, tuple[str, str]] = {
+    "media-needed":           ("Paper tray is empty", "error"),
+    "media-empty":            ("Paper tray is empty", "error"),
+    "media-low":              ("Paper is running low", "warning"),
+    "media-jam":              ("Paper jam — clear the printer", "error"),
+    "toner-low":              ("Toner is running low", "warning"),
+    "toner-empty":            ("Toner is empty", "error"),
+    "marker-supply-low":      ("Ink/toner is running low", "warning"),
+    "marker-supply-empty":    ("Ink/toner is empty", "error"),
+    "marker-waste-almost-full": ("Waste container almost full", "warning"),
+    "marker-waste-full":      ("Waste container full", "error"),
+    "door-open":              ("Printer door is open", "error"),
+    "cover-open":             ("Printer cover is open", "error"),
+    "input-tray-missing":     ("Paper tray is missing", "error"),
+    "output-tray-missing":    ("Output tray is missing", "error"),
+    "output-bin-full":        ("Output tray is full", "error"),
+    "offline-report":         ("Printer is offline", "error"),
+    "paused":                 ("Printer is paused", "warning"),
+    "shutdown":               ("Printer has shut down", "error"),
+    "connecting-to-device":   ("Connecting to printer…", "warning"),
+    "none":                   ("Ready", "ok"),
+}
+
+# Severity rank for picking the most important reason when multiple are present
+_SEVERITY_RANK: dict[str, int] = {"ok": 0, "warning": 1, "error": 2}
+
+# ── IPP job-state integer → user-friendly progress message ────────────────────
+_JOB_PROGRESS_MESSAGES: dict[int, str] = {
+    3: "Waiting to print",
+    4: "Print job is held",
+    5: "Printing in progress",
+    6: "Print job paused",
+    7: "Print job cancelled",
+    8: "Print job failed",
+    9: "Finished",
+}
+
 
 class CupsManager:
     """
@@ -102,8 +143,8 @@ class CupsManager:
             except cups.IPPError as exc:
                 last_exc = exc
                 logger.warning(
-                    "CUPS IPPError on attempt %d/%d for %r: %s",
-                    attempt + 1, settings.CUPS_RETRY_ATTEMPTS, pdf_path, exc,
+                    "CUPS IPPError on attempt %d/%d printer=%r pdf=%r: %s",
+                    attempt + 1, settings.CUPS_RETRY_ATTEMPTS, printer_name, pdf_path, exc,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -131,9 +172,11 @@ class CupsManager:
         Query the current state of a CUPS job.
 
         Returns a dict with:
-          - ``status``        (str)  : human-readable state label
-          - ``state``         (int)  : raw IPP state integer (0 if unknown)
-          - ``state_reasons`` (str)  : comma-joined IPP state-reasons list
+          - ``status``         (str)  : human-readable state label
+          - ``state``          (int)  : raw IPP state integer (0 if unknown)
+          - ``state_reasons``  (str)  : comma-joined IPP state-reasons list
+          - ``driver_message`` (str)  : printer-level message from the backend
+                                        (e.g. "ccp send_data error, exit")
 
         Never raises — returns an "unknown" sentinel dict if CUPS is unreachable
         or the job is not found.
@@ -149,18 +192,21 @@ class CupsManager:
             else:
                 reasons_str = str(reasons_raw)
 
+            driver_message: str = attrs.get("job-printer-state-message", "") or ""
+
             return {
                 "status": _JOB_STATE_LABELS.get(state, f"state-{state}"),
                 "state": state,
                 "state_reasons": reasons_str,
+                "driver_message": driver_message,
             }
         except cups.IPPError as exc:
             # EDGE CASE: job might have been purged from CUPS history after completion
             logger.warning("CUPS IPPError querying job %d: %s", cups_job_id, exc)
-            return {"status": "unknown", "state": 0, "state_reasons": ""}
+            return {"status": "unknown", "state": 0, "state_reasons": "", "driver_message": ""}
         except Exception as exc:
             logger.error("Unexpected error querying CUPS job %d: %s", cups_job_id, exc)
-            return {"status": "unknown", "state": 0, "state_reasons": ""}
+            return {"status": "unknown", "state": 0, "state_reasons": "", "driver_message": ""}
 
     # ── Printer status ─────────────────────────────────────────────────────────
 
@@ -169,23 +215,25 @@ class CupsManager:
         Return the current state of the configured (or specified) printer.
 
         Returns a dict with:
-          - ``state``         (int)       : IPP printer-state integer (0 if unknown)
-          - ``state_reasons`` (list[str]) : list of IPP printer-state-reasons
-          - ``message``       (str)       : human-readable state label
+          - ``state``          (int)       : IPP printer-state integer (0 if unknown)
+          - ``state_reasons``  (list[str]) : list of IPP printer-state-reasons
+          - ``message``        (str)       : human-readable state label
+          - ``driver_message`` (str)       : backend-level message from the printer
+                                             driver (e.g. "ccp send_data error, exit")
 
-        Falls back to ``{"state": 0, "state_reasons": [], "message": "unavailable"}``
-        if CUPS is unreachable.
+        Falls back to ``{"state": 0, "state_reasons": [], "message": "unavailable",
+        "driver_message": ""}`` if CUPS is unreachable.
         """
         target = printer_name or settings.DEFAULT_PRINTER
         if not target:
-            return {"state": 0, "state_reasons": [], "message": "no printer configured"}
+            return {"state": 0, "state_reasons": [], "message": "no printer configured", "driver_message": ""}
 
         try:
             conn = cups.Connection()
             printers: dict = conn.getPrinters()
             if target not in printers:
                 logger.warning("CUPS printer %r not found in printer list", target)
-                return {"state": 0, "state_reasons": [], "message": "printer not found"}
+                return {"state": 0, "state_reasons": [], "message": "printer not found", "driver_message": ""}
 
             printer_info: dict = printers[target]
             state: int = printer_info.get("printer-state", 0)
@@ -193,17 +241,20 @@ class CupsManager:
             if isinstance(reasons_raw, str):
                 reasons_raw = [reasons_raw] if reasons_raw else []
 
+            driver_message: str = printer_info.get("printer-state-message", "") or ""
+
             return {
                 "state": state,
                 "state_reasons": reasons_raw,
                 "message": _PRINTER_STATE_LABELS.get(state, f"state-{state}"),
+                "driver_message": driver_message,
             }
         except cups.IPPError as exc:
             logger.error("CUPS IPPError getting printer status for %r: %s", target, exc)
-            return {"state": 0, "state_reasons": [], "message": "unavailable"}
+            return {"state": 0, "state_reasons": [], "message": "unavailable", "driver_message": ""}
         except Exception as exc:
             logger.error("Unexpected error getting CUPS printer status: %s", exc)
-            return {"state": 0, "state_reasons": [], "message": "unavailable"}
+            return {"state": 0, "state_reasons": [], "message": "unavailable", "driver_message": ""}
 
     # ── Online check ───────────────────────────────────────────────────────────
 
@@ -215,6 +266,139 @@ class CupsManager:
         """
         status = self.get_printer_status(printer_name)
         return status["state"] in _ONLINE_PRINTER_STATES
+
+    # ── User-friendly printer health ───────────────────────────────────────────
+
+    def get_printer_health(self, printer_name: Optional[str] = None) -> dict:
+        """
+        Return a user-friendly health summary for the configured printer.
+
+        Parses IPP printer-state-reasons and picks the highest-severity reason
+        to surface as a single actionable message.  Printers that report no
+        reasons, or only "none", get "Ready" / "ok".
+
+        Returns a dict with:
+          - ``online``       (bool) : True when the printer can accept jobs
+          - ``state_label``  (str)  : raw IPP label ("idle", "processing", etc.)
+          - ``message``      (str)  : human-readable status for users
+          - ``severity``     (str)  : "ok" | "warning" | "error"
+          - ``raw_reasons``  (list) : raw IPP reason strings from the printer
+        """
+        raw = self.get_printer_status(printer_name)
+        state: int = raw.get("state", 0)
+        reasons: list[str] = raw.get("state_reasons", [])
+        state_label: str = raw.get("message", "unavailable")
+
+        online: bool = state in _ONLINE_PRINTER_STATES
+
+        # Printer unreachable / not configured
+        if state == 0:
+            return {
+                "online": False,
+                "state_label": state_label,
+                "message": state_label.replace("-", " ").capitalize(),
+                "severity": "error",
+                "raw_reasons": reasons,
+            }
+
+        # Printer stopped — hard offline regardless of reasons
+        if state == 5:
+            # Try to find a descriptive reason first
+            best_msg, best_sev = "Printer stopped", "error"
+            for reason in reasons:
+                keyword = reason.split("-report")[0].split("-warning")[0]
+                if keyword in _REASON_MESSAGES:
+                    msg, sev = _REASON_MESSAGES[keyword]
+                    if _SEVERITY_RANK.get(sev, 0) >= _SEVERITY_RANK.get(best_sev, 0):
+                        best_msg, best_sev = msg, sev
+            return {
+                "online": False,
+                "state_label": state_label,
+                "message": best_msg,
+                "severity": best_sev,
+                "raw_reasons": reasons,
+            }
+
+        # Idle or processing — scan reasons for any issues
+        best_msg = "Ready"
+        best_sev = "ok"
+        for reason in reasons:
+            # IPP reasons can have "-report" or "-warning" suffixes; strip them
+            # to normalise e.g. "toner-low-report" → "toner-low"
+            keyword = reason
+            for suffix in ("-report", "-warning", "-error"):
+                if keyword.endswith(suffix):
+                    keyword = keyword[: -len(suffix)]
+                    break
+
+            if keyword in _REASON_MESSAGES:
+                msg, sev = _REASON_MESSAGES[keyword]
+                if _SEVERITY_RANK.get(sev, 0) > _SEVERITY_RANK.get(best_sev, 0):
+                    best_msg, best_sev = msg, sev
+            elif keyword != "none" and keyword:
+                # Unknown reason — flag as a generic warning so we don't hide it
+                if best_sev == "ok":
+                    best_msg = "Printer has an unknown condition"
+                    best_sev = "warning"
+
+        return {
+            "online": online,
+            "state_label": state_label,
+            "message": best_msg,
+            "severity": best_sev,
+            "raw_reasons": reasons,
+        }
+
+    # ── User-friendly job progress ─────────────────────────────────────────────
+
+    def get_job_progress(self, cups_job_id: int) -> dict:
+        """
+        Return a user-friendly progress summary for a CUPS job.
+
+        Wraps get_job_status() with a plain-English message suitable for
+        showing directly in the UI.
+
+        Returns a dict with:
+          - ``status``         (str) : IPP state label ("pending", "processing", etc.)
+          - ``message``        (str) : human-readable progress message
+          - ``state``          (int) : raw IPP job-state integer (0 if unknown)
+          - ``driver_message`` (str) : backend-level driver message (pass-through)
+        """
+        raw = self.get_job_status(cups_job_id)
+        state: int = raw.get("state", 0)
+        message = _JOB_PROGRESS_MESSAGES.get(state, "Printing in progress")
+        return {
+            "status": raw.get("status", "unknown"),
+            "message": message,
+            "state": state,
+            "driver_message": raw.get("driver_message", ""),
+        }
+
+    # ── Cancel job ─────────────────────────────────────────────────────────────
+
+    def cancel_job(self, cups_job_id: int) -> bool:
+        """
+        Cancel a CUPS job by ID so it does not linger in the print queue.
+
+        Should be called by the print queue worker whenever the app gives up
+        on a job (timeout or terminal failure state) to prevent accumulation
+        of stuck jobs that could block future prints.
+
+        Returns True on success, False if the job was already gone or could
+        not be cancelled.  Never raises — logs errors and returns False.
+        """
+        try:
+            conn = cups.Connection()
+            conn.cancelJob(cups_job_id, purge_job=False)
+            logger.info("CUPS job %d cancelled successfully", cups_job_id)
+            return True
+        except cups.IPPError as exc:
+            # Job may already have been purged or completed — not an error
+            logger.warning("CUPS cancel job %d: IPPError %s", cups_job_id, exc)
+            return False
+        except Exception as exc:
+            logger.error("CUPS cancel job %d: unexpected error %s", cups_job_id, exc)
+            return False
 
 
 # Module-level singleton — import `cups_manager` everywhere; never instantiate CupsManager elsewhere.

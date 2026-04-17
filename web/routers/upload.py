@@ -58,11 +58,21 @@ router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
 
 
+# Whitelisted flash messages surfaced via the ?msg= redirect param.
+# Values are server-controlled so user-supplied keys cannot inject arbitrary text.
+_FLASH_MESSAGES: dict[str, str] = {
+    "session_expired":  "Your session has expired. Please upload your files to start again.",
+    "session_required": "Please upload your files to begin.",
+    "session_mismatch": "Session error. Please start a new upload.",
+}
+
+
 # ── GET / ─────────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
 async def upload_page(
     request: Request,
+    msg: Optional[str] = None,
     active_job: Optional[PrintJob] = Depends(get_job_from_session),
 ) -> HTMLResponse:
     """
@@ -71,12 +81,17 @@ async def upload_page(
     If the visitor already has a valid session for an in-progress job, the
     template receives it so the UI can show an "active session" warning with
     a link to resume.
+
+    The optional ``msg`` query param is used by other routes that redirect
+    here after a session error; it is resolved against a server-side whitelist
+    before being passed to the template as ``flash_message``.
     """
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
-            "active_job": active_job,
+            "active_job_id": active_job.id if active_job else None,
+            "flash_message": _FLASH_MESSAGES.get(msg) if msg else None,
         },
     )
 

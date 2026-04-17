@@ -151,7 +151,9 @@ class RazorpayService:
 
         SECURITY: Returns False on any failure — never raises on bad signature.
         """
-        if not self.enabled:
+        # Mock mode: either no credentials or a test key that the frontend bypasses
+        # with a fake signature — skip HMAC verification entirely.
+        if not self.enabled or settings.is_mock_payment:
             return True
 
         try:

@@ -23,7 +23,7 @@
     background: #fff;
     border-radius: var(--radius-xl);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow-lg);
+    box-shadow: 0 8px 30px rgba(28, 25, 23, 0.12);
     overflow: hidden;
   }
 
@@ -36,12 +36,12 @@
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    background: rgba(232,130,12,0.15);
+    background: rgba(194,65,12,0.15);
     display: flex;
     align-items: center;
     justify-content: center;
     margin: 0 auto 0.875rem;
-    color: var(--saffron);
+    color: var(--accent);
   }
   .login-title {
     font-family: var(--font-head);
@@ -78,7 +78,7 @@
     cursor: pointer;
     background: none;
     border: none;
-    color: var(--mist);
+    color: var(--muted);
     transition: background 0.15s, color 0.15s;
     font-family: var(--font-body);
   }
@@ -98,13 +98,13 @@
 
   .pattern-hint {
     font-size: 0.8125rem;
-    color: var(--mist);
+    color: var(--muted);
     text-align: center;
     min-height: 1.2em;
     font-weight: 500;
   }
-  .pattern-hint.is-error { color: var(--coral); }
-  .pattern-hint.is-info  { color: var(--forest); }
+  .pattern-hint.is-error { color: var(--error); }
+  .pattern-hint.is-info  { color: var(--success); }
 
   /* Connection lines drawn on the SVG overlay */
   #pattern-svg {
@@ -138,7 +138,7 @@
     transition: background 0.15s, border-color 0.15s;
   }
   .pin-dot.is-filled { background: var(--ink); border-color: var(--ink); }
-  .pin-dot.is-error  { background: var(--coral); border-color: var(--coral); }
+  .pin-dot.is-error  { background: var(--error); border-color: var(--error); }
 
   .pin-keypad {
     display: grid;
@@ -167,7 +167,7 @@
   .pin-key.is-zero { grid-column: 2; }
   .pin-key.is-delete {
     font-size: 1rem;
-    color: var(--mist);
+    color: var(--muted);
     background: var(--cream);
   }
 
@@ -187,13 +187,13 @@
     font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.9375rem;
-    color: var(--coral);
+    color: var(--error);
   }
   .lockout-notice-timer {
     font-size: 1.5rem;
     font-weight: 800;
     font-family: var(--font-head);
-    color: var(--coral);
+    color: var(--error);
     letter-spacing: 0.04em;
   }
 </style>
@@ -221,12 +221,12 @@
       {% if lockout_until %}
       {# Lockout state — show countdown, no auth UI #}
       <div class="lockout-notice">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--coral);" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--error);" aria-hidden="true">
           <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
         </svg>
         <p class="lockout-notice-title">Too many failed attempts</p>
         <div class="lockout-notice-timer" id="lockout-timer" aria-live="polite"></div>
-        <p style="font-size:0.8125rem; color:var(--mist);">Please wait and try again.</p>
+        <p style="font-size:0.8125rem; color:var(--muted);">Please wait and try again.</p>
       </div>
       <script>
         (function () {
@@ -268,8 +268,7 @@
 
       {# Hidden form — submitted programmatically by JS #}
       <form id="auth-form" method="POST" action="/admin/login" style="display:none;">
-        <input type="hidden" name="pin"              id="form-pin">
-        <input type="hidden" name="pattern_sequence" id="form-pattern">
+        <input type="hidden" name="credential" id="form-credential">
       </form>
 
       {# ── Pattern panel ──────────────────────────────────────────────────── #}
@@ -279,7 +278,7 @@
         <div class="pattern-grid-wrap" id="pattern-grid-wrap">
           {# SVG overlay for connection lines #}
           <svg id="pattern-svg" viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg">
-            <g id="pattern-lines" stroke="rgba(232,130,12,0.5)" stroke-width="3" fill="none" stroke-linecap="round"/>
+            <g id="pattern-lines" stroke="rgba(194,65,12,0.5)" stroke-width="3" fill="none" stroke-linecap="round"/>
           </svg>
 
           {# 3×3 grid of dots — positions 1-9 left-to-right, top-to-bottom #}
@@ -292,7 +291,7 @@
         </div>
 
         <button type="button" class="btn btn-ghost btn-sm" id="pattern-reset-btn"
-                style="color:var(--mist);">Reset</button>
+                style="color:var(--muted);">Reset</button>
       </div>
 
       {# ── PIN panel ──────────────────────────────────────────────────────── #}
@@ -324,7 +323,7 @@
     </div>{# /login-body #}
   </div>
 
-  <p style="text-align:center; font-size:0.75rem; color:var(--mist); margin-top:1rem;">
+  <p style="text-align:center; font-size:0.75rem; color:var(--muted); margin-top:1rem;">
     PrintBot v3 &mdash; Admin Portal
   </p>
 </div>
@@ -366,8 +365,7 @@
 
   // ── Form submission ───────────────────────────────────────────────────────────
   function submitAuth(pin, pattern) {
-    document.getElementById('form-pin').value     = pin     || '';
-    document.getElementById('form-pattern').value = pattern || '';
+    document.getElementById('form-credential').value = pin || pattern || '';
     document.getElementById('auth-form').submit();
   }
 

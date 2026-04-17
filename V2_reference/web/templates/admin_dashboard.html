@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="w-full max-w-6xl p-4 sm:p-6 animate-in fade-in duration-700">
+
+    <!-- Navbar / Header -->
+    <div
+        class="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4 bg-white/70 backdrop-blur-md p-4 rounded-2xl border border-white/50 shadow-sm">
+        <div class="flex items-center gap-3">
+            <div
+                class="w-10 h-10 bg-gradient-to-tr from-brand-500 to-joy-purple rounded-xl shadow-lg flex items-center justify-center text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                    stroke="currentColor" class="w-6 h-6">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
+                </svg>
+            </div>
+            <h1 class="text-xl font-heading font-bold text-slate-800 tracking-tight">PrintBot Admin</h1>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <!-- Price Editor (Moved to Rules Section) -->
+            <!-- 
+            <div class="join shadow-sm"> ... </div> 
+            -->
+
+            <a href="/admin/logout" class="btn btn-sm btn-ghost text-red-500 hover:bg-red-50 rounded-xl">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                    stroke="currentColor" class="w-4 h-4 mr-1">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+                </svg>
+                Logout
+            </a>
+        </div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+
+        <!-- Revenue -->
+        <div
+            class="card bg-white shadow-md border border-slate-200 p-6 rounded-3xl hover:-translate-y-1 transition-transform duration-300">
+            <div class="flex items-start justify-between">
+                <div>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Lifetime Revenue</p>
+                    <h3 class="text-3xl font-heading font-black text-slate-800">₹{{ "%.2f"|format(total_revenue) }}</h3>
+                </div>
+                <div
+                    class="w-12 h-12 rounded-2xl bg-green-100 text-green-600 flex items-center justify-center shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                        stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Total Jobs -->
+        <div
+            class="card bg-white shadow-md border border-slate-200 p-6 rounded-3xl hover:-translate-y-1 transition-transform duration-300">
+            <div class="flex items-start justify-between">
+                <div>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Jobs</p>
+                    <h3 class="text-3xl font-heading font-black text-slate-800">{{ total_jobs }}</h3>
+                </div>
+                <div
+                    class="w-12 h-12 rounded-2xl bg-brand-100 text-brand-600 flex items-center justify-center shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                        stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Success Rate -->
+        <div
+            class="card bg-white shadow-md border border-slate-200 p-6 rounded-3xl hover:-translate-y-1 transition-transform duration-300">
+            <div class="flex items-start justify-between">
+                <div>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Success Rate</p>
+                    <h3 class="text-3xl font-heading font-black text-slate-800">{{ "%.0f"|format((completed_jobs /
+                        total_jobs * 100) if total_jobs > 0 else 0) }}%</h3>
+                </div>
+                <div
+                    class="w-12 h-12 rounded-2xl bg-joy-purple/50 text-joy-purple-dark flex items-center justify-center shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                        stroke="currentColor" class="w-6 h-6 text-brand-700">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </div>
+            </div>
+            <p class="text-xs text-slate-400 mt-2 font-medium">{{ completed_jobs }} Completed</p>
+        </div>
+
+        <!-- Failed -->
+        <div
+            class="card bg-white shadow-md border border-slate-200 p-6 rounded-3xl hover:-translate-y-1 transition-transform duration-300">
+            <div class="flex items-start justify-between">
+                <div>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Errors</p>
+                    <h3 class="text-3xl font-heading font-black text-red-500">{{ failed_jobs }}</h3>
+                </div>
+                <div class="w-12 h-12 rounded-2xl bg-red-50 text-red-500 flex items-center justify-center shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                        stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                </div>
+            </div>
+            <p class="text-xs text-slate-400 mt-2 font-medium">Check logs for details</p>
+        </div>
+    </div>
+
+    <!-- Layout Split -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Revenue Chart -->
+        <div class="card bg-white shadow-sm border border-slate-100 lg:col-span-1 rounded-3xl overflow-hidden h-fit">
+            <div class="p-6 pb-0">
+                <h3 class="text-lg font-bold text-slate-700">7-Day Revenue</h3>
+            </div>
+            <div class="card-body p-4 h-64">
+                <canvas id="revenueChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Export Data -->
+        <div class="card bg-white shadow-sm border border-slate-100 lg:col-span-1 rounded-3xl overflow-hidden h-fit">
+            <div class="p-6 pb-2">
+                <h3 class="text-lg font-bold text-slate-700">Export History</h3>
+            </div>
+            <div class="p-6 pt-2">
+                <form action="/admin/api/export-csv" method="post" class="flex flex-col gap-4">
+                    <div class="form-control">
+                        <label class="label"><span class="label-text">Select Month</span></label>
+                        <input type="month" name="month" class="input input-bordered w-full" required>
+                    </div>
+                    <button type="submit" class="btn btn-neutral w-full rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                            stroke="currentColor" class="w-4 h-4 mr-2">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                        </svg>
+                        Download CSV
+                    </button>
+                    <p class="text-xs text-slate-400 text-center">Includes detailed job logs for P&L</p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Pricing Rules Manager -->
+        <div class="card bg-white shadow-sm border border-slate-100 lg:col-span-1 rounded-3xl overflow-hidden h-fit">
+            <div class="p-6 pb-2 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-slate-700">Pricing Rules</h3>
+                <button onclick="document.getElementById('addRuleModal').showModal()"
+                    class="btn btn-sm btn-primary rounded-xl">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                        stroke="currentColor" class="w-4 h-4">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                    Add
+                </button>
+            </div>
+            <div class="overflow-x-auto p-2">
+                <table class="table table-sm">
+                    <thead>
+                        <tr class="text-slate-400 border-b border-slate-100">
+                            <th>Type</th>
+                            <th>Range</th>
+                            <th>Price</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for rule in pricing_rules %}
+                        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-50">
+                            <td>
+                                {% if rule.is_duplex %}
+                                <span class="badge badge-sm badge-outline font-bold text-brand-600">Duplex</span>
+                                {% else %}
+                                <span class="badge badge-sm badge-ghost font-bold text-slate-500">Simplex</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-xs font-mono font-bold text-slate-600">
+                                {{ rule.min_pages }} - {{ rule.max_pages if rule.max_pages else '∞' }}
+                            </td>
+                            <td class="font-bold text-slate-800">₹{{ rule.price_per_page }}</td>
+                            <td>
+                                <form action="/admin/api/pricing-rule/delete" method="post"
+                                    onsubmit="return confirm('Delete this rule?');">
+                                    <input type="hidden" name="rule_id" value="{{ rule.id }}">
+                                    <button type="submit" class="btn btn-ghost btn-xs text-red-400 hover:text-red-600">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                            stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not pricing_rules %}
+                        <tr>
+                            <td colspan="4" class="text-center text-xs text-slate-400 py-4">No custom rules. Fallback to
+                                Standard.</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Jobs Table -->
+        <div class="card bg-white shadow-sm border border-slate-100 lg:col-span-1 rounded-3xl overflow-hidden">
+            <!-- Changed col-span to 1 if we want 3 columns, or reuse 2? The grid is 3 cols. The chart is 1, existing table was 2. Let's make this new card shared with chart col or own col? -->
+            <!-- Actually, Grid is 3 cols. 
+             Revenue Chart: col-span-1
+             New Pricing Card: Let's stack it BELOW Revenue Chart (so still col-span-1) or merge into left column stack.
+             Jobs Table: col-span-2.
+        -->
+
+            <!-- Recent Jobs Table -->
+            <div class="card bg-white shadow-sm border border-slate-100 lg:col-span-2 rounded-3xl overflow-hidden">
+                <div class="p-6 pb-2 flex justify-between items-center">
+                    <h3 class="text-lg font-bold text-slate-700">Recent Jobs</h3>
+                    <div class="badge badge-ghost text-xs">Live</div>
+                </div>
+                <div class="overflow-x-auto p-2">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr class="text-slate-400 border-b border-slate-100">
+                                <th>Time</th>
+                                <th>File</th>
+                                <th>Details</th>
+                                <th>Cost</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="jobTableBody" hx-get="/admin/api/jobs-html" hx-trigger="every 10s"
+                            class="text-slate-600 font-medium">
+                            <!-- Initial Content -->
+                            {% for job in recent_jobs %}
+                            <tr class="hover:bg-brand-50/50 transition-colors border-b border-slate-50">
+                                <td class="text-xs text-slate-400 font-mono">{{ job.created_at.strftime('%m-%d %H:%M')
+                                    }}
+                                </td>
+                                <td>
+                                    <div class="flex items-center gap-2 max-w-xs">
+                                        <div
+                                            class="w-8 h-8 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center shrink-0">
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                                stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                                            </svg>
+                                        </div>
+                                        <span class="truncate text-sm font-semibold" title="{{ job.filename }}">{{
+                                            job.filename }}</span>
+                                    </div>
+                                </td>
+                                <td class="text-xs">
+                                    <span class="badge badge-ghost badge-sm font-mono">{{ job.page_count }}pg x {{
+                                        job.copies }}</span>
+                                </td>
+                                <td class="font-bold text-slate-700">₹{{ job.total_cost }}</td>
+                                <td>
+                                    {% if job.status == 'completed' %}
+                                    <div
+                                        class="badge badge-success badge-sm border-0 bg-green-100 text-green-700 font-bold">
+                                        Done</div>
+                                    {% elif job.status == 'failed' %}
+                                    <div class="badge badge-error badge-sm border-0 bg-red-100 text-red-700 font-bold">
+                                        Failed</div>
+                                    {% elif job.status == 'paid' %}
+                                    <div
+                                        class="badge badge-info badge-sm border-0 bg-blue-100 text-blue-700 font-bold animate-pulse">
+                                        Printing</div>
+                                    {% else %}
+                                    <div class="badge badge-ghost badge-sm text-xs">{{ job.status }}</div>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Fetch Chart Data
+        fetch('/admin/api/stats')
+            .then(response => response.json())
+            .then(data => {
+                const ctx = document.getElementById('revenueChart');
+                new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: data.labels,
+                        datasets: [{
+                            label: 'Revenue (₹)',
+                            data: data.data,
+                            backgroundColor: '#0ea5e9', // Brand 500
+                            borderRadius: 6,
+                            borderSkipped: false,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                grid: { display: true, borderDash: [5, 5] },
+                                ticks: { font: { family: "'Inter', sans-serif" } }
+                            },
+                            x: {
+                                grid: { display: false },
+                                ticks: { font: { family: "'Inter', sans-serif" } }
+                            }
+                        },
+                        animation: {
+                            duration: 1500,
+                            easing: 'easeOutQuart'
+                        }
+                    }
+                });
+            });
+    </script>
+
+    <!-- Add Rule Modal -->
+    <dialog id="addRuleModal" class="modal">
+        <div class="modal-box bg-white rounded-3xl p-6">
+            <h3 class="font-bold text-lg text-slate-800 mb-4">Add Pricing Rule</h3>
+            <form action="/admin/api/pricing-rule/add" method="post" class="flex flex-col gap-4">
+
+                <div class="flex gap-4">
+                    <div class="form-control flex-1">
+                        <label class="label"><span class="label-text">Min Pages</span></label>
+                        <input type="number" name="min_pages" class="input input-bordered w-full" value="1" required
+                            min="1">
+                    </div>
+                    <div class="form-control flex-1">
+                        <label class="label"><span class="label-text">Max Pages</span></label>
+                        <input type="number" name="max_pages" class="input input-bordered w-full"
+                            placeholder="Empty for ∞">
+                        <label class="label"><span class="label-text-alt text-slate-400">Leave empty for
+                                infinity</span></label>
+                    </div>
+                </div>
+
+                <div class="form-control">
+                    <label class="label cursor-pointer justify-start gap-4">
+                        <input type="checkbox" name="is_duplex" class="checkbox checkbox-primary">
+                        <span class="label-text font-bold">Double Sided (Duplex) Rule</span>
+                    </label>
+                </div>
+
+                <div class="form-control">
+                    <label class="label"><span class="label-text">Price Per Sheet (₹)</span></label>
+                    <input type="number" name="price" step="0.5" class="input input-bordered w-full font-bold text-lg"
+                        required>
+                </div>
+
+                <div class="modal-action">
+                    <button type="button" class="btn btn-ghost rounded-xl"
+                        onclick="document.getElementById('addRuleModal').close()">Cancel</button>
+                    <button type="submit" class="btn btn-primary rounded-xl px-8">Save Rule</button>
+                </div>
+            </form>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
+
+    {% endblock %}

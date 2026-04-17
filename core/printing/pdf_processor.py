@@ -8,6 +8,8 @@ Uses PyMuPDF (fitz) as the primary engine and img2pdf for lossless image convers
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import List
 
@@ -291,6 +293,66 @@ class PDFProcessor:
             raise
 
         logger.debug("Image converted to PDF: %s → %s", image_path, output_path)
+        return output_path
+
+    # ── DOCX → PDF ────────────────────────────────────────────────────────────
+
+    def convert_docx_to_pdf(self, docx_path: str, output_path: str) -> str:
+        """Convert a DOCX file to PDF using LibreOffice headless.
+
+        LibreOffice preserves fonts, tables, images, and complex layouts far
+        better than any pure-Python alternative.  It must be installed on the
+        host system (``sudo apt install libreoffice``).
+
+        Args:
+            docx_path:   Path to the source .docx file.
+            output_path: Destination path for the output PDF.
+
+        Returns:
+            output_path (unchanged).
+
+        Raises:
+            EnvironmentError: LibreOffice is not installed / not on PATH.
+            RuntimeError:     LibreOffice exited with a non-zero return code.
+        """
+        if shutil.which("libreoffice") is None:
+            raise EnvironmentError(
+                "LibreOffice is not installed. "
+                "Run: sudo apt install libreoffice"
+            )
+
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(out_dir, exist_ok=True)
+
+        # LibreOffice writes <stem>.pdf into --outdir; we rename to output_path
+        # afterwards so callers always get exactly the path they asked for.
+        result = subprocess.run(
+            [
+                "libreoffice", "--headless",
+                "--convert-to", "pdf",
+                "--outdir", out_dir,
+                os.path.abspath(docx_path),
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"LibreOffice conversion failed: {stderr}")
+
+        # LibreOffice names the output file after the input stem
+        lo_output = Path(out_dir) / (Path(docx_path).stem + ".pdf")
+        if not lo_output.exists():
+            raise RuntimeError(
+                f"LibreOffice reported success but output PDF not found at {lo_output}"
+            )
+
+        # Rename to the caller-specified path if it differs
+        if lo_output != Path(output_path):
+            lo_output.rename(output_path)
+
+        logger.debug("DOCX converted to PDF: %s → %s", docx_path, output_path)
         return output_path
 
     # ── Merge ─────────────────────────────────────────────────────────────────

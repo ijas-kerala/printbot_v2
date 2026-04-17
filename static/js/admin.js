@@ -127,6 +127,10 @@
         printerDot.className = 'printer-status-dot ' + (online ? 'online' : 'offline');
         printerText.textContent = status;
         printerCheck.textContent = 'Last checked: ' + new Date().toLocaleTimeString();
+        var rawEl = document.getElementById('printer-raw-cups');
+        if (rawEl) {
+          rawEl.textContent = data.driver_message ? 'cups: ' + data.driver_message : '';
+        }
       })
       .catch(function () {
         printerDot.className = 'printer-status-dot unknown';
@@ -466,7 +470,7 @@
           var emptyRow = document.createElement('tr');
           var emptyCell = document.createElement('td');
           emptyCell.colSpan = 4;
-          emptyCell.style.cssText = 'text-align:center; padding:1.5rem; color:var(--mist);';
+          emptyCell.style.cssText = 'text-align:center; padding:1.5rem; color:var(--muted);';
           emptyCell.textContent = 'No coupons yet.';
           emptyRow.appendChild(emptyCell);
           couponsTbody.appendChild(emptyRow);
@@ -487,7 +491,7 @@
           tdBalance.textContent = '₹' + parseFloat(coupon.balance).toFixed(2);
 
           var tdCreated = document.createElement('td');
-          tdCreated.style.cssText = 'font-size:0.8125rem; color:var(--mist);';
+          tdCreated.style.cssText = 'font-size:0.8125rem; color:var(--muted);';
           tdCreated.textContent = coupon.created_at
             ? new Date(coupon.created_at).toLocaleDateString()
             : '—';
@@ -539,13 +543,13 @@
 
           if (r.ok && couponCreateResult) {
             couponCreateResult.textContent = 'Created: ' + r.data.code + ' (₹' + amount.toFixed(2) + ')';
-            couponCreateResult.style.color = 'var(--forest)';
+            couponCreateResult.style.color = 'var(--success)';
             if (couponAmountInput) { couponAmountInput.value = ''; }
             loadCoupons();
           } else {
             if (couponCreateResult) {
               couponCreateResult.textContent = (r.data && r.data.detail) ? r.data.detail : 'Failed to create.';
-              couponCreateResult.style.color = 'var(--coral)';
+              couponCreateResult.style.color = 'var(--error)';
             }
           }
         })

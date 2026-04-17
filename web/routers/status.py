@@ -83,11 +83,16 @@ async def get_job_status(
 
     Response shape:
       {
-        "status":        str,            # JobStatus value e.g. "printing"
-        "state_text":    str,            # Human-readable description
-        "is_done":       bool,           # True once COMPLETED / FAILED / EXPIRED
-        "driver_status": dict | None,    # CUPS state info (only while PRINTING)
-        "coupon_code":   str | None,     # Compensation coupon code (only if FAILED)
+        "status":           str,          # JobStatus value e.g. "printing"
+        "state_text":       str,          # Human-readable description
+        "is_done":          bool,         # True once COMPLETED / FAILED / EXPIRED
+        "queue_position":   int | None,   # 0=printing now, N=N jobs ahead, None=not queued
+        "queue_ahead":      int | None,   # jobs ahead (queue_position - 1 when > 0, else None)
+        "estimated_wait":   int | None,   # seconds until likely done, None if unknown
+        "printer_message":  str,          # user-friendly printer state ("Ready", "Paper jam…")
+        "printer_severity": str,          # "ok" | "warning" | "error"
+        "driver_status":    dict | None,  # raw CUPS job info (only while PRINTING)
+        "coupon_code":      str | None,   # compensation coupon code (only if FAILED)
       }
     """
     # SECURITY: validate job_id shape before hitting the DB — prevents arbitrary
@@ -113,13 +118,65 @@ async def get_job_status(
             detail="Job not found.",
         )
 
+    from web.services.print_queue import print_queue  # noqa: PLC0415
+
+    # ── Queue position (only meaningful for active / queued jobs) ─────────────
+    queue_position: Optional[int] = None
+    queue_ahead: Optional[int] = None
+    estimated_wait: Optional[int] = None
+
+    if job.status not in _DONE_STATUSES:
+        queue_position = print_queue.get_position(job_id)
+        if queue_position is not None:
+            queue_ahead = max(0, queue_position - 1) if queue_position > 0 else 0
+            estimated_wait = print_queue.estimate_wait_seconds(queue_position)
+
+    # ── Printer health (for all non-terminal states) ───────────────────────────
+    # While PRINTING the worker's polling loop keeps printer_note in the DB up
+    # to date — use that to avoid a redundant CUPS call on every status poll.
+    # For other active states (paid / processing) we query CUPS directly since
+    # the worker hasn't started monitoring the printer yet.
+    printer_message = "Ready"
+    printer_severity = "ok"
+    if job.status not in _DONE_STATUSES:
+        if job.status == JobStatus.PRINTING and hasattr(job, "printer_note") and job.printer_note:
+            # Worker wrote an issue note — query CUPS for the exact severity level
+            # (the worker only writes non-ok messages so severity is at least warning)
+            printer_message = job.printer_note
+            printer_severity = "warning"  # safe default; CUPS call below may upgrade to error
+            def _get_health_for_note() -> dict:
+                return cups_manager.get_printer_health()
+
+            try:
+                health_note: dict = await asyncio.get_event_loop().run_in_executor(
+                    None, _get_health_for_note
+                )
+                printer_severity = health_note.get("severity", "warning")
+            except Exception:
+                pass  # keep warning default — message already set from DB
+        else:
+            def _get_health() -> dict:
+                return cups_manager.get_printer_health()
+
+            try:
+                health: dict = await asyncio.get_event_loop().run_in_executor(
+                    None, _get_health
+                )
+                printer_message = health.get("message", "Ready")
+                printer_severity = health.get("severity", "ok")
+            except Exception as exc:
+                logger.warning(
+                    "get_job_status: failed to query printer health for job %s: %s",
+                    job_id, exc,
+                )
+
     # ── CUPS driver status (only while actively printing) ─────────────────────
     driver_status: Optional[dict] = None
     if job.status == JobStatus.PRINTING and job.cups_job_id:
         cups_job_id = job.cups_job_id
 
         def _get_cups_status() -> dict:
-            return cups_manager.get_job_status(cups_job_id)
+            return cups_manager.get_job_progress(cups_job_id)
 
         try:
             driver_status = await asyncio.get_event_loop().run_in_executor(
@@ -137,11 +194,20 @@ async def get_job_status(
         coupon_code = job.coupon.code
 
     return {
-        "status":        job.status.value,
-        "state_text":    _STATE_TEXT.get(job.status, job.status.value),
-        "is_done":       job.status in _DONE_STATUSES,
-        "driver_status": driver_status,
-        "coupon_code":   coupon_code,
+        "status":           job.status.value,
+        # PRINTER_ESTIMATE: status_source is not stored on the model — the client triggers
+        # the ESTIMATED display state via polling timeout (150 × 2 s = 5 min).
+        # If a future migration adds a status_source column, return job.status_source here.
+        "status_source":    "confirmed",
+        "state_text":       _STATE_TEXT.get(job.status, job.status.value),
+        "is_done":          job.status in _DONE_STATUSES,
+        "queue_position":   queue_position,
+        "queue_ahead":      queue_ahead,
+        "estimated_wait":   estimated_wait,
+        "printer_message":  printer_message,
+        "printer_severity": printer_severity,
+        "driver_status":    driver_status,
+        "coupon_code":      coupon_code,
     }
 
 
@@ -171,17 +237,20 @@ async def get_machine_status_data(db: AsyncSession) -> dict[str, Any]:
     current_job_id: Optional[str] = queue_snapshot["current_job"]
     queue_length: int = queue_snapshot["queued"]
 
-    # ── Printer status (synchronous CUPS call, offloaded to executor) ──────────
-    def _get_printer() -> dict:
-        return cups_manager.get_printer_status()
+    # ── Printer status + health (synchronous CUPS calls, offloaded to executor) ──
+    def _get_printer() -> tuple[dict, dict]:
+        return cups_manager.get_printer_status(), cups_manager.get_printer_health()
 
     try:
-        printer_status: dict = await asyncio.get_event_loop().run_in_executor(
+        printer_status: dict
+        printer_health: dict
+        printer_status, printer_health = await asyncio.get_event_loop().run_in_executor(
             None, _get_printer
         )
     except Exception as exc:
         logger.error("get_machine_status_data: CUPS printer query failed: %s", exc)
-        printer_status = {"state": 0, "state_reasons": [], "message": "unavailable"}
+        printer_status = {"state": 0, "state_reasons": [], "message": "unavailable", "driver_message": ""}
+        printer_health = {"online": False, "state_label": "unavailable", "message": "Printer unavailable", "severity": "error", "raw_reasons": []}
 
     # ── Derive machine state ───────────────────────────────────────────────────
     machine_state: str
@@ -246,6 +315,14 @@ async def get_machine_status_data(db: AsyncSession) -> dict[str, Any]:
         "current_job_id": current_job_id,
         "queue_length":   queue_length,
         "printer_status": printer_status,
+        "printer_health": {
+            "online":         printer_health.get("online", False),
+            "message":        printer_health.get("message", "Printer unavailable"),
+            "severity":       printer_health.get("severity", "error"),
+            # driver_message contains the raw backend-level text from CUPS
+            # (e.g. "ccp send_data error, exit") — useful for admin diagnostics
+            "driver_message": printer_status.get("driver_message", ""),
+        },
     }
 
 

@@ -20,7 +20,7 @@
   /* Brand lockup */
   .brand-lockup {
     text-align: center;
-    padding: 1rem 0 1.5rem;
+    padding: 0.5rem 0 1.5rem;
   }
   .brand-wordmark {
     font-family: var(--font-head);
@@ -31,10 +31,10 @@
     line-height: 1;
     margin: 0 0 0.25rem;
   }
-  .brand-wordmark span { color: var(--saffron); }
+  .brand-wordmark span { color: var(--accent); }
   .brand-tagline {
     font-size: 0.875rem;
-    color: var(--mist);
+    color: var(--muted);
     margin: 0;
   }
 
@@ -50,11 +50,11 @@
     width: 64px;
     height: 64px;
     border-radius: 50%;
-    background: var(--saffron-light);
+    background: var(--accent-light);
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--saffron);
+    color: var(--accent);
     transition: transform 0.2s;
   }
   .drop-zone.is-dragging .dz-icon-ring {
@@ -69,7 +69,7 @@
   }
   .dz-sub {
     font-size: 0.8125rem;
-    color: var(--mist);
+    color: var(--muted);
     margin: 0;
   }
   .dz-browse {
@@ -78,14 +78,14 @@
     gap: 0.35rem;
     font-size: 0.875rem;
     font-weight: 600;
-    color: var(--saffron);
-    border-bottom: 1.5px solid var(--saffron);
+    color: var(--accent);
+    border-bottom: 1.5px solid var(--accent);
     padding-bottom: 1px;
     pointer-events: auto;
     cursor: pointer;
-    transition: color 0.15s;
+    transition: color 0.15s, border-color 0.15s;
   }
-  .dz-browse:hover { color: #cf7009; border-color: #cf7009; }
+  .dz-browse:hover { color: var(--accent-hover); border-color: var(--accent-hover); }
 
   /* Accepted file types strip */
   .accepted-types {
@@ -120,26 +120,36 @@
     font-size: 0.8125rem;
     font-weight: 600;
   }
-  .size-used { color: var(--ink); }
-  .size-limit { color: var(--mist); }
-  .size-over  { color: var(--coral); }
+  .size-counter-label { color: var(--muted); }
 
   /* File count indicator */
   .file-count-note {
     font-size: 0.75rem;
-    color: var(--mist);
+    color: var(--muted);
     text-align: right;
+  }
+
+  /* Per-file page estimate badge */
+  .file-item-pages {
+    font-size: 0.75rem;
+    color: var(--muted);
+    white-space: nowrap;
+    margin-left: 0.25rem;
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<div style="display:flex; flex-direction:column; gap:1.25rem; width:100%;">
+<div style="display:flex; flex-direction:column; gap:1.25rem; width:100%; padding-bottom:5rem;">
 
-  {# Brand lockup #}
-  <div class="brand-lockup">
-    <h1 class="brand-wordmark">Print<span>Bot</span></h1>
-    <p class="brand-tagline">Self-service document printing</p>
+  {# Flow step indicator #}
+  <div class="animate-fade-in">{{ step_indicator(1) }}</div>
+
+  {# Mascot + brand lockup #}
+  <div class="brand-lockup animate-fade-in-up" style="display:flex; flex-direction:column; align-items:center; gap:0.5rem;">
+    {{ mascot('idle', 'md', 'upload-mascot') }}
+    <h1 class="brand-wordmark" style="margin-top:0.5rem;">Print<span>Bot</span></h1>
+    <p class="brand-tagline">Self-service document printing — fast &amp; easy</p>
   </div>
 
   {# Active job warning — shown if a previous unfinished job exists #}
@@ -150,7 +160,7 @@
     </svg>
     <div>
       You have an active print job.
-      <a href="/settings?job_id={{ active_job_id }}" style="font-weight:600; color:var(--saffron); text-decoration:none;">Continue it →</a>
+      <a href="/settings?job_id={{ active_job_id }}" style="font-weight:600; color:var(--accent); text-decoration:none;">Continue it →</a>
     </div>
   </div>
   {% endif %}
@@ -159,7 +169,7 @@
   <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data" novalidate>
 
     {# Drop zone #}
-    <div class="drop-zone" id="drop-zone" role="button" tabindex="0"
+    <div class="drop-zone animate-scale-in" id="drop-zone" role="button" tabindex="0"
          aria-label="Drag and drop files here, or tap to browse">
       <div class="dz-inner">
         <div class="dz-icon-ring" aria-hidden="true">
@@ -197,7 +207,7 @@
 
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.625rem;">
         <span style="font-size:0.8125rem; font-weight:700; color:var(--ink);">Selected Files</span>
-        <button type="button" id="clear-all-btn" class="btn btn-ghost btn-sm" style="color:var(--coral);">
+        <button type="button" id="clear-all-btn" class="btn btn-ghost btn-sm" style="color:var(--error);">
           Clear all
         </button>
       </div>
@@ -208,36 +218,77 @@
       {# Total size indicator #}
       <div class="size-bar-section" style="margin-top:0.875rem;">
         <div class="size-bar-header">
-          <span id="size-used-label" class="size-used">0 MB</span>
-          <span class="size-limit">90 MB limit</span>
+          <span id="size-counter-label" class="size-counter-label">0 B / 90 MB</span>
+          <span id="file-count-note" class="file-count-note">0 files</span>
         </div>
         <div class="progress-bar-wrap">
           <div class="progress-bar-fill" id="size-bar" style="width:0%"></div>
         </div>
         <p id="size-over-msg" class="field-error" style="display:none;">
-          Total size exceeds 90 MB. Remove some files to continue.
+          Total size is over 90 MB — please remove some files to continue.
         </p>
-        <p id="file-count-note" class="file-count-note">0 files</p>
       </div>
     </div>
 
-    {# Submit button #}
-    <button type="submit" id="submit-btn" class="btn btn-primary btn-lg btn-block"
-            style="margin-top:1.25rem;" disabled aria-disabled="true">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <polyline points="9 18 15 12 9 6"/>
-      </svg>
-      Continue to Print Settings
-    </button>
-
-    {# Upload error area #}
-    <div id="upload-error" style="display:none; margin-top:0.75rem;"></div>
+    {# Upload progress bar — hidden until submit #}
+    <div id="upload-progress-wrap" style="display:none; margin-top:1rem;">
+      <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
+        <span class="spinner" style="width:14px;height:14px;border-width:2px;color:var(--accent);" id="upload-spinner" aria-hidden="true"></span>
+        <span id="upload-progress-label" style="font-size:0.8125rem; color:var(--muted); font-weight:500;">
+          Uploading your files…
+        </span>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="upload-progress"
+             style="width:0%; transition: width 300ms cubic-bezier(0.4,0,0.2,1);"></div>
+      </div>
+    </div>
 
   </form>
+
+  {# Sticky submit footer — always visible regardless of scroll position #}
+  <div class="settings-cta">
+    <div class="settings-cta-inner">
+      {# Upload error area — sits above the button so it's never hidden #}
+      <div id="upload-error" style="display:none; margin-bottom:0.5rem;"></div>
+      <button type="submit" form="upload-form" id="submit-btn" class="btn-primary btn-block"
+              style="height:52px; font-size:1rem;" disabled aria-disabled="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="9 18 15 12 9 6"/>
+        </svg>
+        Continue to Print Settings
+      </button>
+    </div>
+  </div>
 
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script src="/static/js/upload.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    {% if flash_message %}
+    if (typeof showToast === 'function') { showToast({{ flash_message | tojson }}, 'info'); }
+    {% endif %}
+    // Entry animation: mascot waves in, then idles
+    var m = document.getElementById('upload-mascot');
+    if (typeof entryAnimateMascot === 'function') { entryAnimateMascot(m, 'idle', 120); }
+
+    // Poke interaction — wire up after entry finishes
+    setTimeout(function () {
+      if (typeof setupMascotPoke === 'function') { setupMascotPoke(m); }
+    }, 750);
+
+    // React when files are added: switch to working, then back to idle
+    var fileInput = document.getElementById('file-input');
+    var dropZone  = document.getElementById('drop-zone');
+    function onFilesAdded() {
+      if (!m) return;
+      if (typeof flashMascotState === 'function') { flashMascotState(m, 'working', 'idle', 1200); }
+    }
+    if (fileInput) fileInput.addEventListener('change', onFilesAdded);
+    if (dropZone)  dropZone.addEventListener('drop',   onFilesAdded);
+  });
+</script>
 {% endblock %}

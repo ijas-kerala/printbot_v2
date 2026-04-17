@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="w-full text-center flex flex-col items-center justify-center animate-in zoom-in duration-700">
+
+    <!-- Happy Printo Container -->
+    <div class="mb-4 relative group cursor-pointer" onclick="fireNow()">
+        <!-- Glow effect -->
+        <div class="absolute inset-0 bg-joy-yellow rounded-full filter blur-xl opacity-50 animate-pulse"></div>
+
+        <div class="w-48 h-48 relative z-10 transition-transform hover:scale-110 active:scale-90 duration-200">
+            <img src="/static/printo_happy.png" alt="Happy Printo"
+                class="w-full h-full object-contain animate-[bounce_2s_infinite]" />
+        </div>
+
+        <!-- Party icon decorations -->
+        <div class="absolute -top-2 -right-2 text-4xl animate-bounce" style="animation-delay: 0.2s">✨</div>
+        <div class="absolute -bottom-2 -left-2 text-4xl animate-bounce" style="animation-delay: 0.5s">🎉</div>
+    </div>
+
+    <div class="card w-full glass-panel shadow-xl rounded-3xl overflow-hidden mb-6 border-t-8 border-t-brand-400">
+        <div class="card-body p-8 items-center text-center">
+
+            <h2 id="status-title"
+                class="text-3xl font-heading font-black text-transparent bg-clip-text bg-gradient-to-r from-brand-500 to-brand-700 mb-2">
+                Printing Started!</h2>
+            <p id="status-message" data-job-id="{{ job_id }}"
+                class="text-slate-500 font-medium text-lg leading-relaxed">
+                Yay! Payment received.<br>
+                Initializing print job...
+            </p>
+
+            {% if job_id %}
+            <div
+                class="mt-3 inline-flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-full px-4 py-1.5">
+                <span class="text-xs text-slate-400 font-medium">Job ID</span>
+                <span id="job-id-display" class="text-sm font-mono font-bold text-slate-600 select-all">{{ job_id[:12]
+                    }}</span>
+                <button
+                    onclick="navigator.clipboard.writeText('{{ job_id }}'); this.innerText='✓'; setTimeout(()=>this.innerText='📋', 1500)"
+                    class="text-sm hover:scale-110 transition-transform" title="Copy full Job ID">📋</button>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">Note this down in case you need help</p>
+            {% endif %}
+
+            {% if job_id %}
+            <script>
+                (function () {
+                    const msgEl = document.getElementById('status-message');
+                    const titleEl = document.getElementById('status-title');
+                    const jobId = msgEl.getAttribute('data-job-id');
+                    let pollCount = 0;
+                    const MAX_POLLS = 120; // 2s × 120 = 4 minutes
+
+                    function checkStatus() {
+                        // Timeout: stop polling after 4 minutes
+                        if (pollCount >= MAX_POLLS) {
+                            titleEl.innerText = "Still Working...";
+                            titleEl.className = "text-3xl font-heading font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-500 to-orange-500 mb-2";
+                            msgEl.innerHTML = `Taking longer than expected.<br>
+                                Please check the print tray, or show your <strong>Job ID</strong> to staff.`;
+                            return;
+                        }
+                        pollCount++;
+
+                        fetch(`/jobs/${jobId}/status`)
+                            .then(r => r.json())
+                            .then(data => {
+                                msgEl.innerText = data.text;
+
+                                // Reset Title Style
+                                titleEl.className = "text-3xl font-heading font-black text-transparent bg-clip-text bg-gradient-to-r from-brand-500 to-brand-700 mb-2";
+
+                                if (data.status === 'completed') {
+                                    titleEl.innerText = "All Done!";
+                                    msgEl.innerHTML = "Your document is ready.<br>Please collect it from the tray.";
+                                    // Stop polling
+
+                                } else if (data.driver_status === 'queued') {
+                                    // [QUEUE STATUS] User is waiting in line
+                                    titleEl.innerText = "In Queue";
+                                    titleEl.classList.remove("from-brand-500", "to-brand-700");
+                                    titleEl.classList.add("from-yellow-500", "to-orange-500");
+
+                                    msgEl.innerHTML = `<span class="text-4xl block mb-2">⏳</span>${data.text}`;
+
+                                    // Continue polling to update position
+                                    setTimeout(checkStatus, 2000);
+
+                                } else if (data.driver_status && data.driver_status.startsWith('error')) {
+                                    // [HARDWARE ERROR]
+                                    titleEl.innerText = "Printer Issue";
+                                    titleEl.classList.remove("from-brand-500", "to-brand-700");
+                                    titleEl.classList.add("text-red-500");
+
+                                    let warningIcon = "⚠️";
+                                    if (data.driver_status === 'error_paper') warningIcon = "📄";
+                                    if (data.driver_status === 'error_jam') warningIcon = "🔧";
+
+                                    msgEl.innerHTML = `<span class="text-4xl block mb-2">${warningIcon}</span>${data.text}`;
+
+                                    // Continue polling to see if user fixes it
+                                    setTimeout(checkStatus, 2000);
+
+                                } else if (data.status === 'failed') {
+                                    titleEl.innerText = "Oops!";
+                                    titleEl.classList.add("text-red-500"); // Red color for error
+
+                                    // [CREDIT SYSTEM] Show Coupon
+                                    if (data.coupon_code) {
+                                        msgEl.innerHTML = `Printing Failed.<br>
+                                            <div class="mt-4 bg-red-50 border border-red-200 p-4 rounded-xl">
+                                                <p class="text-sm text-red-600 font-bold uppercase mb-1">Refund Coupon Code</p>
+                                                <div class="text-3xl font-mono font-black text-slate-800 select-all tracking-widest bg-white p-2 rounded-lg border border-slate-200">
+                                                    ${data.coupon_code}
+                                                </div>
+                                                <p class="text-xs text-slate-400 mt-2">Enter this code to retry for free!</p>
+                                            </div>`;
+                                    } else {
+                                        msgEl.innerText = "Printing Failed. Please contact support.";
+                                    }
+                                    // Stop polling
+                                } else {
+                                    // Continue polling
+                                    setTimeout(checkStatus, 2000);
+                                }
+                            })
+                            .catch(e => {
+                                console.error("Status Poll Error:", e);
+                                // On network error, keep trying (don't count as timeout)
+                                setTimeout(checkStatus, 3000);
+                            });
+                    }
+
+                    // Start polling after 1s
+                    setTimeout(checkStatus, 1000);
+                })();
+            </script>
+            {% endif %}
+
+            <div class="divider my-4"></div>
+
+            <p class="text-sm text-slate-400">Thanks for using PrintBot!</p>
+
+        </div>
+    </div>
+
+    <!-- Action Button -->
+    <a href="/"
+        class="btn btn-primary btn-lg rounded-full px-8 shadow-xl shadow-brand-500/20 hover:shadow-brand-500/40 hover:-translate-y-1 transition-all">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
+            class="w-6 h-6 mr-2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        Print Another File
+    </a>
+
+</div>
+
+<!-- Confetti Script -->
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+<script>
+    function fireNow() {
+        var count = 200;
+        var defaults = {
+            origin: { y: 0.7 }
+        };
+
+        function fire(particleRatio, opts) {
+            confetti(Object.assign({}, defaults, opts, {
+                particleCount: Math.floor(count * particleRatio)
+            }));
+        }
+
+        fire(0.25, {
+            spread: 26,
+            startVelocity: 55,
+        });
+        fire(0.2, {
+            spread: 60,
+        });
+        fire(0.35, {
+            spread: 100,
+            decay: 0.91,
+            scalar: 0.8
+        });
+        fire(0.1, {
+            spread: 120,
+            startVelocity: 25,
+            decay: 0.92,
+            scalar: 1.2
+        });
+        fire(0.1, {
+            spread: 120,
+            startVelocity: 45,
+        });
+    }
+
+    // Fire on load
+    setTimeout(fireNow, 300);
+</script>
+{% endblock %}

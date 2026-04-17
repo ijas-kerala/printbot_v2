@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="w-full flex flex-col items-center gap-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+
+    <!-- Printo Banner -->
+    <div class="relative w-full flex justify-center mb-2">
+        <div class="absolute inset-0 bg-gradient-to-t from-brand-50 to-transparent bottom-0 h-16 w-full z-0"></div>
+        <img src="/static/printo_wave.png" alt="Printo Waving" class="w-40 h-auto drop-shadow-xl z-10 animate-float" />
+
+        <!-- Speech Bubble -->
+        <div
+            class="absolute -right-2 top-0 bg-white p-3 rounded-2xl rounded-bl-sm shadow-lg border border-brand-100 transform rotate-2 max-w-[140px] z-20">
+            <p class="text-sm font-heading font-semibold text-brand-600 leading-tight">Hi! Send me your file to print!
+            </p>
+        </div>
+    </div>
+
+    <!-- Error Alert -->
+    {% if error %}
+    <div role="alert" class="alert alert-error shadow-lg w-full rounded-2xl animate-bounce-slight">
+        <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="font-medium text-sm">{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <!-- Upload Card -->
+    <div class="card w-full glass-panel shadow-xl rounded-3xl overflow-hidden relative group">
+        <div class="card-body p-6 items-center text-center">
+
+            <h2 class="card-title text-2xl font-bold text-slate-700 mb-1">Upload File</h2>
+            <p class="text-slate-500 text-sm mb-6">PDF, Images, or Word Docs (Max 90MB)</p>
+
+            <!-- Upload Form -->
+            <form action="/upload" method="post" enctype="multipart/form-data" class="w-full relative" id="uploadForm">
+
+                <!-- Drop Zone Visuals -->
+                <div id="drop-zone"
+                    class="border-3 border-dashed border-brand-200 rounded-2xl p-8 transition-all duration-300 bg-brand-50/50 hover:bg-brand-50 hover:border-brand-400 group-hover:border-brand-300 cursor-pointer flex flex-col items-center justify-center gap-3 relative">
+
+                    <div
+                        class="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-md text-brand-500 mb-2 group-hover:scale-110 transition-transform">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                            stroke="currentColor" class="w-8 h-8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                        </svg>
+                    </div>
+
+                    <p class="font-semibold text-brand-700">Tap to Select File</p>
+                    <p class="text-xs text-brand-400">or drag & drop here</p>
+
+                    <!-- The Actual Input (Hidden but covers area) -->
+                    <input type="file" name="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                        onchange="handleFileSelect(this)" accept=".pdf,.jpg,.jpeg,.png,.docx" required />
+                </div>
+
+                <!-- Loading Overlay (Hidden by default) -->
+                <div id="loading-overlay"
+                    class="absolute inset-0 bg-white/95 z-20 flex-col items-center justify-center rounded-2xl hidden p-6">
+                    <div class="w-full max-w-xs flex flex-col items-center">
+                        <span class="loading loading-spinner loading-lg text-brand-500 mb-4"></span>
+                        <p class="text-brand-600 font-bold mb-4" id="upload-status">Uploading...</p>
+
+                        <!-- Progress Bar Container -->
+                        <div
+                            class="w-full bg-slate-100 rounded-full h-4 mb-2 overflow-hidden border border-brand-100 shadow-inner">
+                            <div id="progress-bar"
+                                class="bg-gradient-to-r from-brand-400 via-brand-500 to-brand-600 h-full w-0 transition-all duration-300 ease-out shadow-lg">
+                            </div>
+                        </div>
+                        <p id="progress-text" class="text-xs font-bold text-brand-600">0%</p>
+                    </div>
+                </div>
+
+            </form>
+        </div>
+        <!-- Progress Bar Bottom Decoration -->
+        <div class="h-2 w-full bg-brand-100">
+            <div class="h-full bg-brand-400 w-1/4 rounded-r-full"></div>
+        </div>
+    </div>
+
+    <!-- Google Drive Upload Guidance -->
+    <div id="google-drive-container"
+        class="collapse collapse-arrow bg-blue-50 border border-blue-200 rounded-2xl shadow-sm transition-all duration-300">
+        <input type="checkbox" id="google-drive-toggle" />
+        <div class="collapse-title text-sm font-bold text-blue-700 flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Uploading from Google Drive?</span>
+        </div>
+        <div class="collapse-content text-sm text-slate-600">
+            <p class="mt-2">If you're trying to upload a file directly from Google Drive, it might fail with an error.
+            </p>
+            <p class="mt-2 font-semibold text-blue-700">✅ Solution:</p>
+            <ol class="list-decimal ml-5 mt-1 space-y-1">
+                <li><strong>Download</strong> the file from Google Drive to your device first</li>
+                <li>Then <strong>upload</strong> the downloaded file here</li>
+            </ol>
+            <p class="mt-2 text-xs text-slate-500">This is due to browser security features, not a problem with our
+                service.</p>
+        </div>
+    </div>
+
+    <!-- Helper Chips -->
+    <div class="flex gap-2 justify-center flex-wrap opacity-70">
+        <div class="badge badge-lg bg-white border-none py-3 shadow-sm text-xs font-semibold text-slate-500">
+            <span class="mr-1 text-base">📄</span> A4 Only
+        </div>
+        <div class="badge badge-lg bg-white border-none py-3 shadow-sm text-xs font-semibold text-slate-500">
+            <span class="mr-1 text-base">🔒</span> Secure
+        </div>
+        <div class="badge badge-lg bg-white border-none py-3 shadow-sm text-xs font-semibold text-slate-500">
+            <span class="mr-1 text-base">⚡</span> Fast
+        </div>
+    </div>
+
+</div>
+
+<script>
+    function handleFileSelect(input) {
+        if (input.files && input.files[0]) {
+            uploadFile(input.files[0]);
+        }
+    }
+
+    async function uploadFile(file) {
+        const input = document.querySelector('input[name="file"]');
+        const overlay = document.getElementById('loading-overlay');
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+        const driveToggle = document.getElementById('google-drive-toggle');
+        const driveContainer = document.getElementById('google-drive-container');
+
+        // Show loading state
+        overlay.classList.remove('hidden');
+        overlay.classList.add('flex');
+        progressBar.style.width = '0%';
+        progressText.innerText = '0%';
+
+        // 1. Pre-upload client-side check (fast fail)
+        const maxSize = 90 * 1024 * 1024;
+        if (file.size > maxSize) {
+            alert("File is too large! Max 90MB.");
+            resetUI(input, overlay);
+            return;
+        }
+
+        // 2. Prepare AJAX Upload
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+
+        // Listen to progress
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percent + '%';
+                progressText.innerText = percent + '%';
+            }
+        });
+
+        xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                // Success - check for redirection
+                if (xhr.responseURL && xhr.responseURL !== window.location.href) {
+                    window.location.href = xhr.responseURL;
+                } else {
+                    window.location.href = "/print-settings";
+                }
+            } else {
+                // Error handling
+                handleUploadError(new Error(`Upload failed with status: ${xhr.status}`), input, overlay, driveToggle, driveContainer);
+            }
+        };
+
+        xhr.onerror = function () {
+            handleUploadError(new Error("Network Error"), input, overlay, driveToggle, driveContainer);
+        };
+
+        xhr.open('POST', '/upload', true);
+        xhr.send(formData);
+    }
+
+    function handleUploadError(e, input, overlay, driveToggle, driveContainer) {
+        console.error("Upload Error caught:", e);
+
+        // Reset UI
+        resetUI(input, overlay);
+
+        // Show Google Drive Guidance
+        if (driveToggle && driveContainer) {
+            driveToggle.checked = true;
+            driveContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            // Visual cue
+            driveContainer.classList.add('ring-4', 'ring-red-300', 'ring-opacity-50');
+            setTimeout(() => {
+                driveContainer.classList.remove('ring-4', 'ring-red-300', 'ring-opacity-50');
+            }, 2000);
+        }
+
+        alert("Upload failed. If this file is from Google Drive, please DOWNLOAD it to your device first, then upload it.");
+    }
+
+    function resetUI(input, overlay) {
+        overlay.classList.add('hidden');
+        overlay.classList.remove('flex');
+        input.value = "";
+    }
+
+    // Drag and drop visuals
+    const dropZone = document.getElementById('drop-zone');
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+        dropZone.addEventListener(eventName, highlight, false)
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, unhighlight, false)
+    });
+
+    function highlight(e) {
+        dropZone.classList.add('bg-brand-100', 'border-brand-500', 'scale-[1.02]');
+    }
+
+    function unhighlight(e) {
+        dropZone.classList.remove('bg-brand-100', 'border-brand-500', 'scale-[1.02]');
+    }
+</script>
+{% endblock %}

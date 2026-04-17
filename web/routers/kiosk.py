@@ -119,12 +119,13 @@ async def serve_kiosk(request: Request) -> HTMLResponse:
     )
 
     return templates.TemplateResponse(
+        request,
         "kiosk.html",
         {
-            "request":        request,
             "tunnel_url":     tunnel_url,
             "is_placeholder": is_placeholder,
             "qr_code_path":   settings.QR_CODE_PATH,
+            "shop_name":      settings.SHOP_NAME,
         },
     )
 

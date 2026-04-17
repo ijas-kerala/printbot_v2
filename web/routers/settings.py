@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
@@ -47,7 +47,7 @@ from sqlalchemy.orm import selectinload
 from core.config import settings
 from core.models import Coupon, FileItem, JobStatus, PricingRule, PrintJob
 from core.printing.pdf_processor import CorruptPDFError, PasswordProtectedError, pdf_processor
-from web.dependencies import get_db, require_job_session, verify_job_cookie
+from web.dependencies import get_db, get_job_from_session, require_job_session, verify_job_cookie
 from web.services.razorpay_service import razorpay_service
 
 logger = logging.getLogger(__name__)
@@ -83,43 +83,77 @@ class ConfirmRequest(BaseModel):
 
 # ── GET /settings ─────────────────────────────────────────────────────────────
 
+_SETTINGS_PAID_STATUSES: frozenset[JobStatus] = frozenset({
+    JobStatus.PAID,
+    JobStatus.PROCESSING,
+    JobStatus.PRINTING,
+    JobStatus.COMPLETED,
+})
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(
     request: Request,
-    job_id: str,
+    job_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    session_job: PrintJob = Depends(require_job_session),
+    session_job: Optional[PrintJob] = Depends(get_job_from_session),
 ) -> HTMLResponse:
     """
     Render the print settings page for the given job.
 
-    The session cookie is validated first (require_job_session). We then verify
-    the query-param job_id matches the session to prevent accidental cross-job
-    access (e.g. bookmarked URL with old job_id).
+    Session validation is done manually so that missing/invalid sessions
+    produce a friendly redirect to / rather than a raw 403 or 422 error.
+    The query-param job_id is also optional for the same reason; any mismatch
+    with the cookie-derived job redirects home.
 
     Thumbnails are generated on-demand for any FileItem that doesn't have them.
     This is blocking I/O (PyMuPDF), so it runs in an executor.
     """
-    # SECURITY: cookie job_id must match the URL query param
-    if session_job.id != job_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Job ID does not match your active session.",
+    # Guard: job_id missing from URL
+    if not job_id:
+        return RedirectResponse(
+            url="/?msg=session_required",
+            status_code=status.HTTP_303_SEE_OTHER,
         )
 
-    # Guard against accessing an already-confirmed job
-    if session_job.status == JobStatus.PAYMENT_PENDING and session_job.razorpay_order_id:
-        from fastapi.responses import RedirectResponse
+    # Guard: no valid session cookie
+    if session_job is None:
+        r = RedirectResponse(
+            url="/?msg=session_expired",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+        r.delete_cookie(settings.JOB_SESSION_COOKIE_NAME)
+        return r
 
+    # SECURITY: cookie job_id must match the URL query param
+    if session_job.id != job_id:
+        return RedirectResponse(
+            url="/?msg=session_mismatch",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # Job already paid/processing/done — send the user to the status page
+    if session_job.status in _SETTINGS_PAID_STATUSES:
+        return RedirectResponse(
+            url=f"/success?job_id={session_job.id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # Guard against accessing an already-confirmed job that is still pending payment
+    if session_job.status == JobStatus.PAYMENT_PENDING and session_job.razorpay_order_id:
         return RedirectResponse(
             url=f"/payment?order_id={session_job.razorpay_order_id}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
+
     if session_job.status not in (JobStatus.SETTINGS_PENDING, JobStatus.UPLOADING):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This job has already been processed. Please start a new upload.",
+        # Only remaining cases are FAILED / EXPIRED — nothing useful to show
+        r = RedirectResponse(
+            url="/?msg=session_expired",
+            status_code=status.HTTP_303_SEE_OTHER,
         )
+        r.delete_cookie(settings.JOB_SESSION_COOKIE_NAME)
+        return r
 
     # Fetch job with files (selectinload triggers one extra SQL for the relationship)
     result = await db.execute(
@@ -145,29 +179,27 @@ async def settings_page(
     )
     pricing_rules = rules_result.scalars().all()
 
-    rules_json = json.dumps(
-        [
-            {
-                "id": r.id,
-                "min_pages": r.min_pages,
-                "max_pages": r.max_pages,  # None → unlimited
-                "is_duplex": r.is_duplex,
-                "price_per_page": r.price_per_page,
-            }
-            for r in pricing_rules
-        ]
-    )
+    pricing_rules_list = [
+        {
+            "id": r.id,
+            "min_pages": r.min_pages,
+            "max_pages": r.max_pages,
+            "is_duplex": r.is_duplex,
+            "price_per_page": r.price_per_page,
+        }
+        for r in pricing_rules
+    ]
 
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
-            "request": request,
             "job": job,
+            "job_id": job.id,
             "files": files_context,
-            "pricing_rules_json": rules_json,
-            "fallback_price": settings.PRICE_PER_PAGE,
+            "pricing_rules": pricing_rules_list,
+            "price_per_page": settings.PRICE_PER_PAGE,
             "razorpay_key_id": settings.RAZORPAY_KEY_ID,
-            # Mock mode flag so the template can show a dev banner
             "is_mock_payment": settings.is_mock_payment,
         },
     )
@@ -509,6 +541,68 @@ async def confirm_settings(
     }
 
 
+# ── POST /api/coupon/check ─────────────────────────────────────────────────────
+
+class CouponCheckRequest(BaseModel):
+    code: str
+    job_id: str
+
+
+@router.post("/api/coupon/check")
+async def check_coupon(
+    body: CouponCheckRequest,
+    db: AsyncSession = Depends(get_db),
+    session_job: PrintJob = Depends(require_job_session),
+) -> dict:
+    """
+    Validate a coupon code and return its current redeemable balance.
+
+    Does NOT redeem the coupon — redemption happens only in confirm_settings.
+    This endpoint is safe to call speculatively from the settings page.
+
+    Returns:
+      { "valid": true,  "discount": float, "message": str }
+      { "valid": false, "message": str }
+    """
+    # SECURITY: session must own this job
+    if session_job.id != body.job_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Job ID does not match your active session.",
+        )
+
+    code = body.code.strip().upper()
+    if not code:
+        return {"valid": False, "message": "Enter a coupon code."}
+
+    result = await db.execute(
+        select(Coupon).where(Coupon.code == code)
+    )
+    coupon = result.scalar_one_or_none()
+
+    if coupon is None:
+        return {"valid": False, "message": "Coupon not found."}
+
+    if coupon.balance <= 0:
+        return {"valid": False, "message": "This coupon has already been used."}
+
+    # Coupon is already attached to a *different* job that has been paid
+    if coupon.job_id and coupon.job_id != body.job_id:
+        other_result = await db.execute(
+            select(PrintJob.status).where(PrintJob.id == coupon.job_id)
+        )
+        other_status = other_result.scalar_one_or_none()
+        if other_status and other_status not in (JobStatus.SETTINGS_PENDING, JobStatus.UPLOADING):
+            return {"valid": False, "message": "This coupon has already been applied."}
+
+    logger.info("Coupon %s checked for job %s — balance ₹%.2f", code, body.job_id, coupon.balance)
+    return {
+        "valid": True,
+        "discount": coupon.balance,
+        "message": f"Coupon valid — ₹{coupon.balance:.2f} will be deducted.",
+    }
+
+
 # ── Private helpers ────────────────────────────────────────────────────────────
 
 async def _ensure_thumbnails(file_item: FileItem, job_id: str) -> dict:
@@ -548,16 +642,82 @@ async def _ensure_thumbnails(file_item: FileItem, job_id: str) -> dict:
     page_count: int = file_item.page_count  # may be 0 if not yet determined
 
     if conversion_pending:
-        # Can't generate thumbnails until the conversion background task finishes.
-        # The template shows a "Converting…" skeleton for this file.
-        return {
-            "id": file_item.id,
-            "original_name": file_item.original_name,
-            "page_count": page_count,
-            "thumb_urls": [],
-            "conversion_pending": True,
-            "error": None,
-        }
+        # Images (JPG/PNG) can be converted to PDF inline right now.
+        # DOCX still requires an external conversion tool (not implemented).
+        if raw_ext in (".jpg", ".jpeg", ".png"):
+            converted_pdf = str(
+                Path(settings.UPLOAD_DIR) / job_id / f"converted_{file_item.id}.pdf"
+            )
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: pdf_processor.convert_image_to_pdf(
+                        file_item.stored_path, converted_pdf
+                    ),
+                )
+                file_item.converted_path = converted_pdf
+                effective_path = converted_pdf  # thumbnails must use the converted PDF
+                is_usable_pdf = True
+                conversion_pending = False
+                logger.info(
+                    "Converted image FileItem %d to PDF: %s (job %s)",
+                    file_item.id, converted_pdf, job_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Image-to-PDF conversion failed for FileItem %d (job %s): %s",
+                    file_item.id, job_id, exc,
+                )
+                return {
+                    "id": file_item.id,
+                    "original_name": file_item.original_name,
+                    "page_count": 0,
+                    "thumb_urls": [],
+                    "conversion_pending": False,
+                    "error": "Could not convert image to PDF.",
+                }
+        elif raw_ext == ".docx":
+            converted_pdf = str(
+                Path(settings.UPLOAD_DIR) / job_id / f"converted_{file_item.id}.pdf"
+            )
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: pdf_processor.convert_docx_to_pdf(
+                        file_item.stored_path, converted_pdf
+                    ),
+                )
+                file_item.converted_path = converted_pdf
+                effective_path = converted_pdf
+                is_usable_pdf = True
+                conversion_pending = False
+                logger.info(
+                    "Converted DOCX FileItem %d to PDF: %s (job %s)",
+                    file_item.id, converted_pdf, job_id,
+                )
+            except EnvironmentError as exc:
+                logger.error("LibreOffice not available (job %s): %s", job_id, exc)
+                return {
+                    "id": file_item.id,
+                    "original_name": file_item.original_name,
+                    "page_count": 0,
+                    "thumb_urls": [],
+                    "conversion_pending": False,
+                    "error": "DOCX conversion unavailable — LibreOffice is not installed.",
+                }
+            except Exception as exc:
+                logger.error(
+                    "DOCX conversion failed for FileItem %d (job %s): %s",
+                    file_item.id, job_id, exc,
+                )
+                return {
+                    "id": file_item.id,
+                    "original_name": file_item.original_name,
+                    "page_count": 0,
+                    "thumb_urls": [],
+                    "conversion_pending": False,
+                    "error": "Could not convert DOCX to PDF.",
+                }
 
     if is_usable_pdf:
         # Check whether existing thumbnails match the expected page count

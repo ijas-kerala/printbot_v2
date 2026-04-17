@@ -2,22 +2,21 @@
 
 {% block title %}PrintBot — Kiosk{% endblock %}
 
+{# Inject kiosk-mode on the root <html> element so app.css tokens flip to dark #}
+{% block html_class %}kiosk-mode{% endblock %}
+
 {% block head_extra %}
 <style>
-  /* ── Kiosk root overrides ────────────────────────────────────────────────── */
-  /* Dark theme: swap paper/ink tokens for the kiosk night mode */
+  /* ── Reset base layout ───────────────────────────────────────────────────── */
   html, body {
-    background-color: #0F0F1A;
-    color: #F5F0EB;
     overflow: hidden;
     width: 100vw;
     height: 100vh;
-    touch-action: none; /* prevent accidental scroll/zoom on touchscreen */
+    touch-action: none;
   }
 
-  /* Suppress the default base.html layout wrapper */
-  body > main,
-  body > footer {
+  /* Suppress base.html's centered <main> wrapper */
+  body > main {
     display: none !important;
   }
 
@@ -26,20 +25,21 @@
     position: fixed;
     inset: 0;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    /* 45% QR panel / 55% status panel, per spec */
+    grid-template-columns: 45% 55%;
     width: 1024px;
     height: 600px;
-    /* Centre the 1024×600 frame on whatever physical display is connected */
+    /* Centre the fixed frame on whatever display is connected */
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
     font-family: var(--font-body);
+    background: var(--kiosk-bg);
   }
 
-  /* ── Left panel — QR code + branding ────────────────────────────────────── */
+  /* ── Left panel — QR code + shop identity ───────────────────────────────── */
   #kiosk-left {
-    background-color: #F5F0EB;
-    color: #1A1A2E;
+    background-color: var(--paper);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -48,221 +48,174 @@
     padding: 2.5rem;
   }
 
-  #kiosk-brand {
-    font-family: var(--font-head);
-    font-size: 2rem;
-    font-weight: 800;
-    letter-spacing: -0.03em;
-    color: #1A1A2E;
-  }
-
   #kiosk-qr {
     width: 220px;
     height: 220px;
-    border-radius: 12px;
+    border-radius: 10px;
     background: #fff;
     padding: 10px;
-    box-shadow: 0 4px 16px rgba(26,26,46,0.12);
+    box-shadow: var(--shadow-sm);
+    display: block;
   }
 
   #kiosk-qr-placeholder {
     width: 220px;
     height: 220px;
-    border-radius: 12px;
-    background: #EDE8E1;
-    border: 2px dashed #D5CEC5;
+    border-radius: 10px;
+    background: var(--cream);
+    border: 2px dashed var(--border);
     display: flex;
     align-items: center;
     justify-content: center;
     text-align: center;
     padding: 1.5rem;
     font-size: 0.8rem;
-    color: #6B7280;
+    color: var(--muted);
     line-height: 1.4;
   }
 
-  #kiosk-instruction {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: #1A1A2E;
-    letter-spacing: 0.01em;
+  #kiosk-scan-label {
+    font-family: var(--font-head);
+    font-size: 1.375rem; /* 22px */
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
   }
 
-  #kiosk-url {
-    font-size: 0.75rem;
-    color: #6B7280;
-    word-break: break-all;
-    text-align: center;
-    max-width: 240px;
+  #kiosk-shop-name {
+    font-family: var(--font-body);
+    font-size: 0.875rem; /* 14px */
+    font-weight: 400;
+    color: var(--muted);
   }
 
-  /* ── Right panel — live status feed ─────────────────────────────────────── */
-  #status-panel {
+  /* ── Right panel — live mascot + status ─────────────────────────────────── */
+  #kiosk-right {
+    background-color: var(--kiosk-bg);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 1.5rem;
     padding: 2.5rem;
-    transition: background-color 0.5s ease;
     position: relative;
-    /* Default state: dark/idle */
-    background-color: #1A1A2E;
   }
 
-  /* State colour classes — applied by kiosk.js via updateState() */
-  #status-panel.state-idle           { background-color: #1A1A2E; }
-  #status-panel.state-uploading      { background-color: #92400E; } /* amber-900 equivalent for dark warmth */
-  #status-panel.state-payment_pending { background-color: #7C2D12; } /* orange-900 */
-  #status-panel.state-printing       { background-color: #1E3A5F; } /* blue-900 */
-  #status-panel.state-completed      { background-color: #14532D; } /* green-900 */
-  #status-panel.state-error          { background-color: #7F1D1D; } /* red-900 */
-
-  /* ── Status icon area ───────────────────────────────────────────────────── */
-  #status-icon {
-    width: 96px;
-    height: 96px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.08);
+  /* Mascot size override for kiosk large (120px base → fill available height) */
+  #kiosk-right .dot-mascot {
     flex-shrink: 0;
   }
 
-  #status-icon svg {
-    width: 52px;
-    height: 52px;
-  }
+  /* In kiosk dark bg, .kiosk-mode in app.css already inverts dot-head fill.
+     Ensure the leg fill reads correctly against the dark background. */
 
-  /* Printing pulse animation */
-  @keyframes print-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50%       { opacity: 0.6; transform: scale(0.92); }
-  }
-  #status-panel.state-printing #status-icon {
-    animation: print-pulse 1.6s ease-in-out infinite;
-    background: rgba(59,130,246,0.25);
-  }
-
-  /* ── Status text ────────────────────────────────────────────────────────── */
-  #status-text {
+  #kiosk-headline {
     font-family: var(--font-head);
-    font-size: 1.6rem;
+    font-size: 1.875rem; /* 30px */
     font-weight: 700;
-    color: #F5F0EB;
+    color: var(--kiosk-text);
     text-align: center;
-    line-height: 1.25;
+    line-height: 1.2;
     max-width: 340px;
   }
 
-  #queue-info {
-    font-size: 0.9rem;
-    color: rgba(245,240,235,0.6);
+  #kiosk-desc {
+    font-size: 1rem;
+    color: rgba(249, 250, 251, 0.55); /* kiosk-text at reduced opacity */
     text-align: center;
-    min-height: 1.25em; /* reserve space to prevent layout shift */
+    min-height: 1.4em;
+    max-width: 320px;
   }
 
   /* ── Reconnecting overlay ───────────────────────────────────────────────── */
+  /* No backdrop-filter — glassmorphism is forbidden per .cursorrules */
   #reconnect-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(15,15,26,0.8);
+    background: rgba(17, 24, 39, 0.92);
     display: none;
     align-items: center;
     justify-content: center;
     flex-direction: column;
     gap: 0.75rem;
-    backdrop-filter: blur(4px);
     z-index: 10;
   }
   #reconnect-overlay.visible {
     display: flex;
   }
   #reconnect-overlay p {
-    font-size: 1rem;
-    color: rgba(245,240,235,0.7);
+    font-size: 0.9rem;
+    color: rgba(249, 250, 251, 0.6);
     font-family: var(--font-body);
-  }
-
-  /* ── Hidden admin trigger (top-right corner tap zone) ───────────────────── */
-  #admin-trigger {
-    position: fixed;
-    top: 0;
-    right: 0;
-    width: 80px;
-    height: 80px;
-    z-index: 50;
-    /* Fully transparent — invisible to users, functional for staff */
-    background: transparent;
-    cursor: default;
-    -webkit-tap-highlight-color: transparent;
   }
 </style>
 {% endblock %}
 
-{# Suppress base.html body wrapper — kiosk uses a completely custom layout #}
+{# Kiosk uses a completely custom layout — bypass base.html's <main> wrapper #}
 {% block body_start %}
 <div id="kiosk-root">
 
-  {# ── Left panel: QR code + branding ────────────────────────────────────── #}
+  {# ── Left panel: QR code + shop identity ───────────────────────────────── #}
   <div id="kiosk-left">
-    <span id="kiosk-brand">PrintBot</span>
 
     {% if is_placeholder %}
     {# EDGE CASE: TUNNEL_URL not configured in .env #}
     <div id="kiosk-qr-placeholder">
-      <span>Configure TUNNEL_URL in .env to display QR code</span>
+      Configure TUNNEL_URL in .env to display QR code
     </div>
     {% else %}
     <img
       id="kiosk-qr"
       src="/static/icons/qr_code.png"
       alt="Scan to print — {{ tunnel_url }}"
+      width="220"
+      height="220"
     >
     {% endif %}
 
-    <p id="kiosk-instruction">Scan to Print</p>
-    {% if not is_placeholder %}
-    <p id="kiosk-url">{{ tunnel_url }}</p>
-    {% endif %}
+    <p id="kiosk-scan-label">Scan to print</p>
+    <p id="kiosk-shop-name">{{ shop_name }}</p>
+
   </div>
 
-  {# ── Right panel: live job status via SSE ─────────────────────────────── #}
-  <div id="status-panel" class="state-idle">
+  {# ── Right panel: Dot mascot + live status via SSE ────────────────────── #}
+  <div id="kiosk-right">
 
-    {# Reconnecting overlay — shown while SSE is down #}
+    {# Reconnecting overlay — shown while SSE is down, hides on reconnect #}
     <div id="reconnect-overlay" role="status" aria-live="polite">
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(245,240,235,0.7)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
-        <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+      {# Inline SVG: refresh/cycle icon (Heroicons outline) #}
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
+           stroke="rgba(249,250,251,0.55)" stroke-width="1.5"
+           stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <path d="M21 2v6h-6"/>
+        <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+        <path d="M3 22v-6h6"/>
+        <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
       </svg>
       <p>Reconnecting...</p>
     </div>
 
-    {# Status icon — SVG swapped by kiosk.js per state #}
-    <div id="status-icon" aria-hidden="true">
-      {# Default: idle icon (clock / ready) #}
-      <svg viewBox="0 0 24 24" fill="none" stroke="#F5F0EB" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/>
-        <polyline points="12 6 12 12 16 14"/>
-      </svg>
-    </div>
+    {# Dot mascot — state driven by kiosk.js via setMascotState #}
+    {{ mascot('idle', 'lg') }}
 
-    {# Primary status message #}
-    <p id="status-text">Ready to print</p>
+    {# Primary status headline #}
+    <p id="kiosk-headline">Ready to print</p>
 
-    {# Secondary queue/sub-state info #}
-    <p id="queue-info"></p>
+    {# Secondary description / queue info #}
+    <p id="kiosk-desc">Scan the QR code to start</p>
 
   </div>
+
 </div>
 
-{# Hidden admin trigger zone — top-right corner, 5 taps → /admin/login #}
-<div id="admin-trigger" aria-hidden="true"></div>
+{# Hidden admin tap zone — top-right corner, 5 taps in 2s → /admin/login #}
+<div id="admin-tap"
+     style="position:fixed;top:0;right:0;width:70px;height:70px;z-index:999;"
+     aria-hidden="true"></div>
 {% endblock %}
 
-{# Suppress the default <main> and <footer> blocks #}
+{# Suppress the default <main> content block #}
 {% block content %}{% endblock %}
 
 {% block scripts %}

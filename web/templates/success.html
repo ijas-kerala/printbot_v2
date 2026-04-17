@@ -1,223 +1,413 @@
 {% extends "base.html" %}
 {#
-  web/templates/success.html
-  Post-payment status page. Polls /api/status/<job_id> until terminal state.
+  web/templates/success.html — Post-payment print status page.
+
+  Polls /jobs/<job_id>/status every 2 s until a terminal state.
+  success.js owns all DOM mutations after first render; this template
+  only provides the structural scaffold and initial server-rendered state.
 
   Jinja2 context:
-    job_id    (str)  — PrintJob UUID
-    status    (str)  — initial status string (e.g. "paid", "printing")
-    shop_name (str)
+    job_id    (str) — PrintJob UUID
+    status    (str) — initial JobStatus value (e.g. "paid", "processing")
+    shop_name (str) — available for display if needed
 #}
 
-{% block title %}Your Print Job — PrintBot{% endblock %}
+{% block title %}Print Status — PrintBot{% endblock %}
 
 {% block head_extra %}
 <style>
-  body > main { max-width: 480px; }
+  /* ── Page layout ─────────────────────────────────────────────────────────── */
 
-  /* ── Status card ─────────────────────────────────────────────────────────── */
-  .success-card {
-    background: #fff;
-    border-radius: var(--radius-xl);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-md);
-    overflow: hidden;
+  .success-page {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
     width: 100%;
+    padding-top: 0.5rem;
   }
 
-  .success-header {
-    padding: 2rem 1.5rem 1.75rem;
-    text-align: center;
-    transition: background 0.4s ease;
+  /* ── Mascot frame — relative anchor for burst overlay ───────────────────── */
+
+  .mascot-frame {
+    position: relative;
+    width: 80px;
+    height: 96px;
+    flex-shrink: 0;
   }
-  .success-header.is-waiting  { background: var(--saffron-light); }
-  .success-header.is-printing { background: #EFF6FF; }
-  .success-header.is-done     { background: #ECFDF5; }
-  .success-header.is-error    { background: #FEF2F2; }
+
+  /* ── Burst animation (COMPLETED only — pure CSS, no external lib) ────────── */
+
+  .burst-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  .burst-container.burst-active {
+    visibility: visible;
+  }
+
+  .burst-line {
+    position: absolute;
+    width: 2px;
+    height: 24px;
+    background: var(--accent);
+    border-radius: 1px;
+    /*
+      Head center: SVG (40, 40) in an 80 × 96 viewBox renders to
+      left 50%, top 41.67% of the frame — works for any rendered size.
+    */
+    left: 50%;
+    top: 41.67%;
+    margin-left: -1px;
+    margin-top: -12px;
+    transform-origin: center center;
+  }
+
+  .burst-line-1 { --rot: 0deg;   }
+  .burst-line-2 { --rot: 60deg;  }
+  .burst-line-3 { --rot: 120deg; }
+  .burst-line-4 { --rot: 180deg; }
+  .burst-line-5 { --rot: 240deg; }
+  .burst-line-6 { --rot: 300deg; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    @keyframes burst-out {
+      0%   { transform: rotate(var(--rot)) translateY(-24px) scaleY(0); opacity: 1; }
+      55%  { transform: rotate(var(--rot)) translateY(-48px) scaleY(1); opacity: 1; }
+      100% { transform: rotate(var(--rot)) translateY(-60px) scaleY(0); opacity: 0; }
+    }
+
+    .burst-container.burst-active .burst-line {
+      animation: burst-out 0.65s ease-out forwards;
+    }
+    .burst-container.burst-active .burst-line-1 { animation-delay: 0.00s; }
+    .burst-container.burst-active .burst-line-2 { animation-delay: 0.04s; }
+    .burst-container.burst-active .burst-line-3 { animation-delay: 0.08s; }
+    .burst-container.burst-active .burst-line-4 { animation-delay: 0.12s; }
+    .burst-container.burst-active .burst-line-5 { animation-delay: 0.16s; }
+    .burst-container.burst-active .burst-line-6 { animation-delay: 0.20s; }
+  }
+
+  /* ── Status text ──────────────────────────────────────────────────────────── */
 
   .status-headline {
     font-family: var(--font-head);
-    font-size: 1.375rem;
+    font-size: 2rem;
     font-weight: 800;
     letter-spacing: -0.02em;
-    margin: 0 0 0.25rem;
-    transition: color 0.3s;
-  }
-  .status-headline.is-waiting  { color: #7C4700; }
-  .status-headline.is-printing { color: #1e3a8a; }
-  .status-headline.is-done     { color: #065F46; }
-  .status-headline.is-error    { color: var(--coral); }
-
-  .status-sub {
-    font-size: 0.875rem;
-    color: var(--mist);
+    color: var(--ink);
+    text-align: center;
+    line-height: 1.15;
     margin: 0;
+  }
+
+  .status-desc {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    font-weight: 400;
+    color: var(--muted);
+    text-align: center;
+    line-height: 1.6;
+    max-width: 36ch;
+    margin: 0;
+  }
+
+  /* ── Job ID pill ──────────────────────────────────────────────────────────── */
+
+  .job-id-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.625rem;
+    background: var(--cream);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.875rem;
+    transition: padding 0.2s ease;
+  }
+
+  /* Prominent mode — used in ESTIMATED state so users can show it to staff */
+  .job-id-pill.prominent {
+    padding: 0.75rem 1.125rem;
+  }
+
+  .job-id-text {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 400;
+    color: var(--ink);
+    letter-spacing: 0.02em;
+    line-height: 1;
+    word-break: break-all;
+    transition: font-size 0.2s ease, font-weight 0.2s ease;
+  }
+
+  .job-id-pill.prominent .job-id-text {
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .copy-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px;
+    color: var(--muted);
+    border-radius: var(--radius-sm);
+    transition: color 0.15s ease;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    line-height: 1;
+  }
+
+  .copy-btn:hover  { color: var(--ink); }
+  .copy-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ── Queue info + time anchor ─────────────────────────────────────────────── */
+
+  .queue-info,
+  .time-anchor {
+    font-family: var(--font-body);
+    font-size: 0.875rem;
+    color: var(--muted);
+    text-align: center;
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .time-anchor { font-style: italic; }
+
+  /* ── Separator ────────────────────────────────────────────────────────────── */
+
+  .success-divider {
+    width: 100%;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── Coupon card (FAILED with compensation coupon) ────────────────────────── */
+
+  .coupon-card {
+    width: 100%;
+    background: var(--cream);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 1.25rem 1.5rem;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .coupon-label {
+    font-family: var(--font-body);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+  }
+
+  .coupon-code-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+  }
+
+  .coupon-code-value {
+    font-family: var(--font-mono);
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    color: var(--ink);
+  }
+
+  .coupon-note {
+    font-size: 0.8125rem;
+    color: var(--muted);
     line-height: 1.5;
   }
 
-  /* Pulse dots for "in-progress" states */
-  .pulse-dots {
-    display: inline-flex;
-    gap: 5px;
-    align-items: center;
-    margin-top: 0.75rem;
+  /* ── Extra burst lines (7-12) — interleaved between existing 6 ─────────── */
+
+  @media (prefers-reduced-motion: no-preference) {
+    .burst-line-7  { --rot: 30deg;  animation-delay: 0.02s; }
+    .burst-line-8  { --rot: 90deg;  animation-delay: 0.06s; }
+    .burst-line-9  { --rot: 150deg; animation-delay: 0.10s; }
+    .burst-line-10 { --rot: 210deg; animation-delay: 0.14s; }
+    .burst-line-11 { --rot: 270deg; animation-delay: 0.18s; }
+    .burst-line-12 { --rot: 330deg; animation-delay: 0.22s; }
   }
-  .pulse-dots span {
-    width: 7px;
-    height: 7px;
+
+  /* ── Ripple rings (expanding circles on COMPLETED) ─────────────────────── */
+
+  .ripple-container {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .ripple-ring {
+    position: absolute;
+    width: 80px;
+    height: 80px;
+    margin: -40px;
     border-radius: 50%;
-    background: var(--saffron);
-    animation: pulse-dot 1.4s ease-in-out infinite;
+    border: 2.5px solid var(--accent);
+    opacity: 0;
+    transform: scale(0.35);
   }
-  .pulse-dots span:nth-child(2) { animation-delay: 0.2s; }
-  .pulse-dots span:nth-child(3) { animation-delay: 0.4s; }
-  @keyframes pulse-dot {
-    0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
-    40%            { transform: scale(1.0); opacity: 1; }
-  }
-  .pulse-dots.printing span { background: #3b82f6; }
 
-  /* ── Job details ─────────────────────────────────────────────────────────── */
-  .job-details {
-    padding: 1.25rem 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.875rem;
+  @media (prefers-reduced-motion: no-preference) {
+    @keyframes ripple-expand {
+      0%   { transform: scale(0.3);  opacity: 0.65; }
+      100% { transform: scale(3.2);  opacity: 0; }
+    }
+    .ripple-container.ripple-active .ripple-ring {
+      animation: ripple-expand 1s cubic-bezier(0.2, 0.6, 0.4, 1) forwards;
+    }
+    .ripple-container.ripple-active .ripple-ring-1 { animation-delay: 0.00s; }
+    .ripple-container.ripple-active .ripple-ring-2 { animation-delay: 0.20s; }
+    .ripple-container.ripple-active .ripple-ring-3 { animation-delay: 0.40s; }
   }
-  .detail-row {
-    display: flex;
-    justify-content: space-between;
+
+  /* ── Print another file link ──────────────────────────────────────────────── */
+
+  .print-another {
+    font-family: var(--font-body);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--accent);
+    text-decoration: none;
+    display: inline-flex;
     align-items: center;
-    padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 0.875rem;
-  }
-  .detail-row:last-child { border-bottom: none; }
-  .detail-label { color: var(--mist); }
-  .detail-value { font-weight: 600; color: var(--ink); }
-
-  /* ── Coupon / error section ──────────────────────────────────────────────── */
-  .coupon-section {
-    padding: 1.25rem 1.5rem;
-    border-top: 1px solid var(--border);
-    display: none;
-  }
-  .coupon-code-box {
-    background: var(--saffron-light);
-    border: 1.5px dashed var(--saffron);
-    border-radius: var(--radius-md);
-    padding: 0.875rem 1.25rem;
-    text-align: center;
-  }
-  .coupon-code-label {
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--mist);
-    margin-bottom: 0.375rem;
-  }
-  .coupon-code-value {
-    font-family: var(--font-head);
-    font-size: 1.5rem;
-    font-weight: 800;
-    color: var(--ink);
-    letter-spacing: 0.12em;
-  }
-  .coupon-code-note {
-    font-size: 0.8125rem;
-    color: var(--mist);
-    margin-top: 0.375rem;
+    gap: 0.375rem;
   }
 
-  /* ── Print ticket footer ─────────────────────────────────────────────────── */
-  .ticket-footer {
-    padding: 1rem 1.5rem;
-    border-top: 1px dashed var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 0.75rem;
-    color: var(--mist);
-  }
-  .job-id-display {
-    font-family: 'Courier New', monospace;
-    font-size: 0.7rem;
-    letter-spacing: 0.04em;
+  .print-another:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<div style="display:flex; flex-direction:column; gap:1.25rem; width:100%; align-items:center;">
+<div class="success-page" role="main">
 
-  {# Status icon ring — updated by success.js #}
-  <div id="status-ring" class="status-ring status-ring-waiting" aria-hidden="true">
-    <svg id="status-icon" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-    </svg>
+  {# Flow step indicator — step 4 = Done #}
+  <div class="animate-fade-in" style="width:100%;">{{ step_indicator(4) }}</div>
+
+  {# Mascot + burst overlay — JS swaps dot-* state classes on the SVG element #}
+  <div class="mascot-frame">
+    {# Expanding ripple rings — JS adds .ripple-active on COMPLETED #}
+    <div class="ripple-container" id="ripple-container" aria-hidden="true">
+      <span class="ripple-ring ripple-ring-1"></span>
+      <span class="ripple-ring ripple-ring-2"></span>
+      <span class="ripple-ring ripple-ring-3"></span>
+    </div>
+    <div class="burst-container" id="burst-container" aria-hidden="true">
+      {# 6 original lines + 6 extra = 12 lines cycling through 6 colours #}
+      <span class="burst-line burst-line-1"></span>
+      <span class="burst-line burst-line-2"></span>
+      <span class="burst-line burst-line-3"></span>
+      <span class="burst-line burst-line-4"></span>
+      <span class="burst-line burst-line-5"></span>
+      <span class="burst-line burst-line-6"></span>
+      <span class="burst-line burst-line-7"></span>
+      <span class="burst-line burst-line-8"></span>
+      <span class="burst-line burst-line-9"></span>
+      <span class="burst-line burst-line-10"></span>
+      <span class="burst-line burst-line-11"></span>
+      <span class="burst-line burst-line-12"></span>
+    </div>
+    {{ mascot('working') }}
   </div>
 
-  {# Main status card #}
-  <div class="success-card">
+  {# Status text — content replaced by JS on each poll update #}
+  <h1 class="status-headline" id="status-headline">Getting your document ready</h1>
+  <p class="status-desc" id="status-desc">Almost there.</p>
 
-    {# Status header #}
-    <div class="success-header is-waiting" id="status-header">
-      <h1 class="status-headline is-waiting" id="status-headline">Processing your job…</h1>
-      <p class="status-sub" id="status-sub">Payment confirmed. Your job is in the queue.</p>
-      <div class="pulse-dots" id="pulse-dots">
-        <span></span><span></span><span></span>
-      </div>
-    </div>
-
-    {# Job details rows #}
-    <div class="job-details">
-      <div class="detail-row">
-        <span class="detail-label">Job ID</span>
-        <span class="detail-value job-id-display">{{ job_id[:8] | upper }}…</span>
-      </div>
-      <div class="detail-row" id="detail-status-row">
-        <span class="detail-label">Status</span>
-        <span class="detail-value" id="detail-status">
-          <span class="badge badge-{{ status }}">{{ status.replace('_', ' ') | title }}</span>
-        </span>
-      </div>
-      <div class="detail-row" id="detail-cups-row" style="display:none;">
-        <span class="detail-label">Printer status</span>
-        <span class="detail-value" id="detail-cups"></span>
-      </div>
-    </div>
-
-    {# Coupon code (shown on failure) #}
-    <div class="coupon-section" id="coupon-section">
-      <div class="coupon-code-box">
-        <p class="coupon-code-label">Refund Coupon</p>
-        <p class="coupon-code-value" id="coupon-code">——</p>
-        <p class="coupon-code-note">Use this code on your next print job</p>
-      </div>
-    </div>
-
-    {# Ticket footer #}
-    <div class="ticket-footer">
-      <span class="job-id-display" style="font-size:0.65rem;">{{ job_id }}</span>
-      <span id="poll-status" style="font-size:0.7rem;">Checking status…</span>
-    </div>
-
+  {#
+    Job ID pill — always visible. Gains .prominent class in ESTIMATED state
+    so users can clearly show it to staff if the print never appears.
+  #}
+  <div class="job-id-pill" id="job-id-pill" aria-label="Job ID">
+    <span class="job-id-text" id="job-id-text">{{ job_id }}</span>
+    <button class="copy-btn" id="copy-job-id" aria-label="Copy job ID" title="Copy job ID">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>
+    </button>
   </div>
 
-  {# Actions (shown once terminal) #}
-  <div id="terminal-actions" style="display:none; text-align:center;">
-    <a href="/" class="btn btn-secondary" style="margin-bottom:0.5rem;">Print another document</a>
+  {# Queue info — shown only during PRINTING (confirmed) when queue_ahead > 0 #}
+  <p class="queue-info" id="queue-info" hidden></p>
+
+  {# Time anchor — shown during PRINTING (confirmed) only #}
+  <p class="time-anchor" id="time-anchor" hidden>Usually ready in under 2 minutes</p>
+
+  <div class="success-divider"></div>
+
+  {# Coupon card — revealed only on FAILED state when a coupon was issued #}
+  <div class="coupon-card" id="coupon-card" hidden>
+    <p class="coupon-label">Your reprint code</p>
+    <div class="coupon-code-row">
+      <span class="coupon-code-value" id="coupon-code-value"></span>
+      <button class="copy-btn" id="copy-coupon" aria-label="Copy reprint code" title="Copy reprint code">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+      </button>
+    </div>
+    <p class="coupon-note">Enter this code when you start your next print — no charge.</p>
+  </div>
+
+  {# Print another — revealed after any terminal state #}
+  <div id="print-another-wrap" hidden>
+    <a href="/" class="print-another">
+      Print another file
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12h14M12 5l7 7-7 7"/>
+      </svg>
+    </a>
   </div>
 
 </div>
 
-{# Embed job id for success.js #}
+{# Embedded data for success.js — avoids injecting raw values into JS #}
 <script id="success-data" type="application/json">
-{ "job_id": {{ job_id | tojson }}, "initial_status": {{ status | tojson }} }
+{"job_id": {{ job_id | tojson }}, "initial_status": {{ status | tojson }}}
 </script>
 {% endblock %}
 
 {% block scripts %}
 <script src="/static/js/success.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var m = document.querySelector('.dot-mascot');
+    if (typeof entryAnimateMascot === 'function') { entryAnimateMascot(m, 'working', 80); }
+    // Poke is wired up after entry animation finishes (~600ms)
+    setTimeout(function () {
+      if (typeof setupMascotPoke === 'function') { setupMascotPoke(m); }
+    }, 700);
+  });
+</script>
 {% endblock %}

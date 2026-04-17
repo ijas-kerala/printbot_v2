@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -187,6 +187,16 @@ def create_app() -> FastAPI:
     application.include_router(status.router)
     application.include_router(admin.router)
     application.include_router(kiosk.router)
+
+    # ── No-cache middleware for JS/CSS ─────────────────────────────────────────
+    # Prevents browsers from serving stale static assets after a server update.
+    @application.middleware("http")
+    async def _no_cache_assets(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/static/") and path.endswith((".js", ".css")):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     # ── Health endpoint ────────────────────────────────────────────────────────
     @application.get("/health", tags=["ops"])

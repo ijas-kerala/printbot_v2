@@ -19,6 +19,12 @@ Pipeline for each job:
     8. On success: set completed_at, schedule file deletion
     9. On failure: set failed_reason, generate compensation coupon
 
+Restart recovery:
+  Jobs left in PRINTING state (CUPS already submitted) when the server
+  restarts are resumed at step 7 — they are never re-submitted to CUPS,
+  preventing a double-print.  Jobs left in PAID or PROCESSING are
+  re-queued from the beginning (requeue_interrupted_jobs).
+
 The worker creates its own DB sessions via AsyncSessionLocal — it runs outside
 the FastAPI request lifecycle so Depends(get_db) is not available.
 """
@@ -56,6 +62,11 @@ _CUPS_TIMEOUT_S: float = 600.0             # 10 min max for a CUPS job to finish
 _CUPS_FAILED_STATES: frozenset[int] = frozenset({6, 7, 8})  # stopped, cancelled, aborted
 _CUPS_COMPLETED_STATE: int = 9
 
+# After this many seconds of the CUPS job returning state=0 (unknown), assume
+# the job was purged from CUPS history after completing successfully.
+# Raised from 30 s to 60 s to reduce false "completed" signals.
+_CUPS_UNKNOWN_STATE_ASSUME_DONE_S: float = 60.0
+
 # Alphabet for coupon code generation (uppercase alpha + digits, no O/0/I/1 ambiguity)
 _COUPON_ALPHABET: str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _COUPON_CODE_LEN: int = 8
@@ -67,20 +78,42 @@ class PrintQueue:
 
     Only one job is processed at a time, ensuring the printer is never
     overwhelmed and job ordering is deterministic.
+
+    Queue position semantics:
+      position 0 = the job currently being processed (_current_job_id)
+      position 1 = next job in _ordered_ids (index 0)
+      position N = _ordered_ids[N-1]
     """
+
+    # Rough per-job time budget used for wait-time estimates.
+    # Covers PDF processing + CUPS submission + average print time.
+    # 120 s is more realistic than 60 s for multi-page duplex jobs.
+    _SECS_PER_JOB: int = 120
+
+    # Log a warning when the waiting queue exceeds this depth so the operator
+    # knows the printer is building up a backlog (jobs are never rejected since
+    # the user has already paid).
+    _QUEUE_DEPTH_WARN: int = 5
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._current_job_id: Optional[str] = None
+        # Ordered list of job IDs waiting in the queue (excludes the current job)
+        self._ordered_ids: list[str] = []
 
     # ── Public interface ───────────────────────────────────────────────────────
 
     async def enqueue(self, job_id: str) -> None:
         """Add a job ID to the processing queue."""
+        self._ordered_ids.append(job_id)
         await self._queue.put(job_id)
-        logger.info(
-            "Job %s enqueued (queue depth now %d)", job_id, self._queue.qsize()
-        )
+        depth = self._queue.qsize()
+        logger.info("Job %s enqueued (queue depth now %d)", job_id, depth)
+        if depth > self._QUEUE_DEPTH_WARN:
+            logger.warning(
+                "Print queue depth is %d (threshold %d) — printer may be slow or stuck",
+                depth, self._QUEUE_DEPTH_WARN,
+            )
 
     async def worker(self) -> None:
         """
@@ -96,6 +129,11 @@ class PrintQueue:
         while True:
             job_id = await self._queue.get()
             self._current_job_id = job_id
+            # Remove from ordered list now that it is actively processing
+            try:
+                self._ordered_ids.remove(job_id)
+            except ValueError:
+                pass  # already removed or was never there (e.g. requeue edge case)
             try:
                 await self.process_job(job_id)
             except Exception as exc:
@@ -114,6 +152,37 @@ class PrintQueue:
             "queued": self._queue.qsize(),
         }
 
+    def get_position(self, job_id: str) -> Optional[int]:
+        """
+        Return the 0-based queue position for a job.
+
+        Position 0  → job is currently being processed.
+        Position N  → N jobs are ahead (N ≥ 1).
+        None        → job is not in the active queue (already done, or unknown).
+        """
+        if self._current_job_id == job_id:
+            return 0
+        try:
+            # _ordered_ids holds only waiting jobs; add 1 to account for the
+            # currently-active job at position 0.
+            return self._ordered_ids.index(job_id) + 1
+        except ValueError:
+            return None
+
+    def estimate_wait_seconds(self, position: Optional[int]) -> Optional[int]:
+        """
+        Return a rough wait-time estimate in seconds for the given queue position.
+
+        Position 0 → currently printing, return 0.
+        Position N → N * _SECS_PER_JOB seconds.
+        None       → cannot estimate, return None.
+        """
+        if position is None:
+            return None
+        if position == 0:
+            return 0
+        return position * self._SECS_PER_JOB
+
     async def requeue_interrupted_jobs(self) -> None:
         """
         Re-enqueue any jobs that were left in an active state due to a server
@@ -122,6 +191,8 @@ class PrintQueue:
 
         Jobs in PAID, PROCESSING, or PRINTING are considered interrupted —
         they never reached COMPLETED or FAILED, so they need to be retried.
+        Jobs are re-enqueued ordered by paid_at so queue positions remain
+        deterministic after a restart.
         """
         interrupted_statuses = (
             JobStatus.PAID,
@@ -130,9 +201,9 @@ class PrintQueue:
         )
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(PrintJob).where(
-                    PrintJob.status.in_([s.value for s in interrupted_statuses])
-                )
+                select(PrintJob)
+                .where(PrintJob.status.in_([s.value for s in interrupted_statuses]))
+                .order_by(PrintJob.paid_at.asc().nullsfirst())
             )
             jobs: list[PrintJob] = list(result.scalars().all())
 
@@ -156,6 +227,10 @@ class PrintQueue:
         Each major step opens its own DB session to write incremental progress.
         This way a crash mid-pipeline leaves the job in a clearly identifiable
         state (PROCESSING vs PRINTING) rather than still PAID.
+
+        Restart recovery: if the job is already in PRINTING state when picked
+        up (server restarted mid-print), skip CUPS re-submission entirely and
+        resume polling the existing CUPS job — preventing a double print.
         """
         logger.info("process_job: starting job %s", job_id)
 
@@ -164,6 +239,18 @@ class PrintQueue:
         if job is None:
             # EDGE CASE: job vanished from DB between enqueue and processing
             logger.error("process_job: job %s not found in DB — aborting", job_id)
+            return
+
+        # ── Restart recovery: PRINTING job with existing CUPS job ──────────────
+        # The server restarted after submitting to CUPS but before polling finished.
+        # Resume at the polling step instead of re-submitting — prevents double print.
+        if job.status == JobStatus.PRINTING and job.cups_job_id:
+            logger.warning(
+                "process_job: job %s restarting from PRINTING state "
+                "(cups_job_id=%d) — resuming CUPS poll, skipping re-submit",
+                job_id, job.cups_job_id,
+            )
+            await self._poll_and_finalize(job_id, job.cups_job_id)
             return
 
         # ── Step 2: Wait for DOCX conversions to complete ─────────────────────
@@ -221,9 +308,13 @@ class PrintQueue:
                 return
             printer = settings.DEFAULT_PRINTER
 
+        # CUPS requires an absolute path — resolve before entering the executor
+        # so that a relative UPLOAD_DIR doesn't cause IPP_NOT_FOUND errors.
+        abs_final_pdf = str(Path(final_pdf).resolve())
+
         def _submit() -> int:
             return cups_manager.submit_job(
-                pdf_path=final_pdf,
+                pdf_path=abs_final_pdf,
                 printer_name=printer,
                 copies=job.copies,
                 is_duplex=job.is_duplex,
@@ -252,62 +343,8 @@ class PrintQueue:
                 "process_job: job %s → PRINTING (cups_job_id=%d)", job_id, cups_job_id
             )
 
-        # ── Step 7: Poll CUPS until done ───────────────────────────────────────
-        elapsed = 0.0
-        final_state: Optional[int] = None
-
-        while elapsed < _CUPS_TIMEOUT_S:
-            await asyncio.sleep(_CUPS_POLL_INTERVAL_S)
-            elapsed += _CUPS_POLL_INTERVAL_S
-
-            def _get_status() -> dict:
-                return cups_manager.get_job_status(cups_job_id)
-
-            status_dict: dict = await asyncio.get_event_loop().run_in_executor(
-                None, _get_status
-            )
-            state = status_dict.get("state", 0)
-            logger.debug(
-                "process_job: CUPS poll job %d state=%s (%ds elapsed)",
-                cups_job_id, status_dict.get("status"), int(elapsed),
-            )
-
-            if state == _CUPS_COMPLETED_STATE:
-                final_state = state
-                break
-            if state in _CUPS_FAILED_STATES:
-                final_state = state
-                break
-            # EDGE CASE: job purged from CUPS history before we could read it —
-            # treat "unknown" state after >30s of printing as likely completed.
-            if state == 0 and elapsed > 30:
-                logger.warning(
-                    "process_job: CUPS job %d returned unknown state after %.0fs — "
-                    "assuming completed",
-                    cups_job_id, elapsed,
-                )
-                final_state = _CUPS_COMPLETED_STATE
-                break
-
-        if final_state is None:
-            # Timed out waiting for CUPS
-            reason = f"CUPS job {cups_job_id} timed out after {int(_CUPS_TIMEOUT_S)}s"
-            logger.error("process_job: %s (job %s)", reason, job_id)
-            await self._fail_job(job_id, reason, issue_coupon=True)
-            return
-
-        # ── Step 8 / 9: Complete or fail ───────────────────────────────────────
-        if final_state == _CUPS_COMPLETED_STATE:
-            await self._complete_job(job_id)
-        else:
-            status_info = cups_manager.get_job_status(cups_job_id)
-            reason = (
-                f"CUPS job {cups_job_id} ended with state "
-                f"'{status_info.get('status', 'unknown')}': "
-                f"{status_info.get('state_reasons', '')}"
-            )
-            logger.error("process_job: %s (job %s)", reason, job_id)
-            await self._fail_job(job_id, reason, issue_coupon=True)
+        # ── Steps 7–9: Poll CUPS until done, then complete or fail ────────────
+        await self._poll_and_finalize(job_id, cups_job_id)
 
     # ── Pipeline helpers ───────────────────────────────────────────────────────
 
@@ -315,8 +352,15 @@ class PrintQueue:
         self, job_id: str
     ) -> tuple[Optional[PrintJob], list[FileItem]]:
         """
-        Fetch the PrintJob with its files eagerly loaded and transition it to
-        PROCESSING.  Returns (None, []) if the job no longer exists.
+        Fetch the PrintJob with its files eagerly loaded and advance its status.
+
+        Status transition rules:
+          PAID / PROCESSING → PROCESSING  (normal path)
+          PRINTING          → unchanged   (restart recovery — CUPS already submitted)
+
+        Returns (None, []) if the job no longer exists.
+        The caller inspects job.status to decide whether to resume polling or
+        run the full pipeline.
         """
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -328,8 +372,12 @@ class PrintQueue:
             if job is None:
                 return None, []
 
-            job.status = JobStatus.PROCESSING
-            await session.commit()
+            # Preserve PRINTING status so the restart-recovery path in
+            # process_job() can detect that CUPS was already submitted and
+            # skip re-submission (preventing a double print).
+            if job.status != JobStatus.PRINTING:
+                job.status = JobStatus.PROCESSING
+                await session.commit()
 
             # Detach copies of the data we need — session will be closed after
             # this block, so we extract plain attributes.
@@ -465,6 +513,138 @@ class PrintQueue:
         )
         return result
 
+    async def _poll_and_finalize(self, job_id: str, cups_job_id: int) -> None:
+        """
+        Poll CUPS until the job reaches a terminal state, then complete or fail it.
+
+        Extracted from process_job() so it can be called both for the normal
+        path (after CUPS submit) and the restart-recovery path (when the job
+        was already in PRINTING state, CUPS job already submitted).
+
+        Steps 7–9 from the pipeline docstring live here.
+        """
+        # ── Step 7: Poll CUPS until done ──────────────────────────────────────
+        elapsed = 0.0
+        final_state: Optional[int] = None
+        last_printer_note: Optional[str] = None   # tracks last DB-written printer note
+
+        while elapsed < _CUPS_TIMEOUT_S:
+            await asyncio.sleep(_CUPS_POLL_INTERVAL_S)
+            elapsed += _CUPS_POLL_INTERVAL_S
+
+            def _get_status_and_health() -> tuple[dict, dict]:
+                return (
+                    cups_manager.get_job_status(cups_job_id),
+                    cups_manager.get_printer_health(),
+                )
+
+            status_dict: dict
+            printer_health: dict
+            status_dict, printer_health = await asyncio.get_event_loop().run_in_executor(
+                None, _get_status_and_health
+            )
+            state = status_dict.get("state", 0)
+            printer_sev = printer_health.get("severity", "ok")
+            printer_msg = printer_health.get("message", "Ready")
+
+            logger.debug(
+                "process_job: CUPS poll job %d state=%s printer=%r sev=%s (%ds elapsed)",
+                cups_job_id, status_dict.get("status"), printer_msg, printer_sev, int(elapsed),
+            )
+
+            # Write printer note to DB whenever it changes so the status API can
+            # surface it to the user immediately (avoids a CUPS call per-poll).
+            note_to_write: Optional[str] = printer_msg if printer_sev != "ok" else None
+            if note_to_write != last_printer_note:
+                await self._update_printer_note(job_id, note_to_write)
+                last_printer_note = note_to_write
+
+            if state == _CUPS_COMPLETED_STATE:
+                final_state = state
+                break
+            if state in _CUPS_FAILED_STATES:
+                final_state = state
+                break
+            # EDGE CASE: job purged from CUPS history before we could read it.
+            # After _CUPS_UNKNOWN_STATE_ASSUME_DONE_S seconds of unknown state,
+            # treat as completed — it is more likely the job finished and was
+            # purged than that it silently failed.
+            if state == 0 and elapsed > _CUPS_UNKNOWN_STATE_ASSUME_DONE_S:
+                logger.warning(
+                    "process_job: CUPS job %d returned unknown state after %.0fs — "
+                    "assuming completed (job may have been purged from CUPS history)",
+                    cups_job_id, elapsed,
+                )
+                final_state = _CUPS_COMPLETED_STATE
+                break
+
+        if final_state is None:
+            # Timed out — cancel the CUPS job so it doesn't linger in the queue
+            # and block future prints, then mark our DB record as failed.
+            reason = f"CUPS job {cups_job_id} timed out after {int(_CUPS_TIMEOUT_S)}s"
+            logger.error("process_job: %s (job %s)", reason, job_id)
+            cancelled = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cups_manager.cancel_job(cups_job_id)
+            )
+            if not cancelled:
+                logger.warning(
+                    "process_job: CUPS cancel for job %d may have failed — "
+                    "the job could still be in the printer queue",
+                    cups_job_id,
+                )
+            await self._fail_job(job_id, reason, issue_coupon=True)
+            return
+
+        # ── Step 8 / 9: Complete or fail ──────────────────────────────────────
+        if final_state == _CUPS_COMPLETED_STATE:
+            await self._complete_job(job_id)
+        else:
+            # Terminal failure state (stopped/cancelled/aborted) — cancel the CUPS
+            # job to prevent it accumulating in the queue, then fail our record.
+            status_info = cups_manager.get_job_status(cups_job_id)
+            reason = (
+                f"CUPS job {cups_job_id} ended with state "
+                f"'{status_info.get('status', 'unknown')}': "
+                f"{status_info.get('state_reasons', '')}"
+            )
+            logger.error("process_job: %s (job %s)", reason, job_id)
+            cancelled = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cups_manager.cancel_job(cups_job_id)
+            )
+            if not cancelled:
+                logger.warning(
+                    "process_job: CUPS cancel for job %d may have failed — "
+                    "the job could still be in the printer queue",
+                    cups_job_id,
+                )
+            await self._fail_job(job_id, reason, issue_coupon=True)
+
+    async def _update_printer_note(self, job_id: str, note: Optional[str]) -> None:
+        """
+        Write (or clear) a live printer status note on the PrintJob row.
+
+        Called during the CUPS polling loop whenever the printer health message
+        changes, so the status API can expose it to users without making an
+        extra CUPS call per poll request.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(PrintJob).where(PrintJob.id == job_id)
+                )
+                job: Optional[PrintJob] = result.scalar_one_or_none()
+                if job is not None:
+                    job.printer_note = note
+                    await session.commit()
+                    logger.debug(
+                        "_update_printer_note: job %s printer_note=%r", job_id, note
+                    )
+        except Exception as exc:
+            # Non-critical — log but never let this kill the polling loop
+            logger.warning(
+                "_update_printer_note: failed for job %s: %s", job_id, exc
+            )
+
     async def _complete_job(self, job_id: str) -> None:
         """Set job status to COMPLETED and schedule file deletion."""
         async with AsyncSessionLocal() as session:
@@ -478,6 +658,7 @@ class PrintQueue:
 
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            job.printer_note = None  # clear any mid-print notes on success
             await session.commit()
             logger.info("process_job: job %s → COMPLETED", job_id)
 

@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     JOB_SESSION_SECRET: str = "change-me-in-production"
     JOB_SESSION_MAX_AGE: int = 1800  # 30 minutes
 
+    # ── Shop identity ─────────────────────────────────────────────────────────
+    SHOP_NAME: str = "PrintBot"
+
     # ── Tunnel / public URL ───────────────────────────────────────────────────
     # Must point to the Cloudflare-proxied URL so Razorpay webhooks reach us
     TUNNEL_URL: str = "https://print.example.com"
