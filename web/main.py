@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 # ── Cleanup interval ───────────────────────────────────────────────────────────
 _CLEANUP_INTERVAL_SECONDS: int = 30 * 60  # 30 minutes
 
+# Delay before the watchdog restarts a crashed worker task.
+_WORKER_RESTART_DELAY_SECONDS: int = 5
+
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 
@@ -67,9 +70,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from web.services.print_queue import print_queue  # noqa: PLC0415
     await print_queue.requeue_interrupted_jobs()
 
-    # ── 5. Start print queue worker ────────────────────────────────────────────
-    worker_task = asyncio.create_task(print_queue.worker(), name="print_queue_worker")
-    logger.info("Print queue worker task started")
+    # ── 5. Start print queue worker (wrapped in watchdog) ─────────────────────
+    worker_task = asyncio.create_task(
+        _worker_watchdog(print_queue), name="print_queue_worker"
+    )
+    logger.info("Print queue worker watchdog started")
 
     # ── 6. Start periodic cleanup task ────────────────────────────────────────
     cleanup_task = asyncio.create_task(_cleanup_loop(), name="cleanup_loop")
@@ -123,6 +128,40 @@ async def _run_migrations() -> None:
             )
     except Exception as exc:
         logger.error("Failed to run Alembic migrations: %s", exc, exc_info=True)
+
+
+async def _worker_watchdog(print_queue) -> None:  # type: ignore[type-arg]
+    """
+    Restart the print queue worker if it crashes unexpectedly.
+
+    The worker() coroutine itself never raises (it catches all exceptions
+    per job), but an OS-level error at the while-True level (e.g. an
+    asyncio internal fault) could kill it silently.  This watchdog wraps
+    the worker so it is automatically restarted after a short delay,
+    preventing a situation where the queue freezes indefinitely with no
+    indication to operators.
+
+    CancelledError is re-raised so that graceful shutdown (lifespan cleanup)
+    still works correctly.
+    """
+    while True:
+        try:
+            await print_queue.worker()
+            # worker() should never return normally (it's an infinite loop),
+            # but if it does, restart it just like a crash.
+            logger.error(
+                "Print queue worker returned unexpectedly — restarting in %ds",
+                _WORKER_RESTART_DELAY_SECONDS,
+            )
+        except asyncio.CancelledError:
+            logger.info("Print queue worker watchdog: cancelled (shutdown)")
+            raise
+        except Exception as exc:
+            logger.critical(
+                "Print queue worker crashed: %s — restarting in %ds",
+                exc, _WORKER_RESTART_DELAY_SECONDS, exc_info=True,
+            )
+        await asyncio.sleep(_WORKER_RESTART_DELAY_SECONDS)
 
 
 async def _cleanup_loop() -> None:
@@ -219,6 +258,21 @@ def create_app() -> FastAPI:
             logger.error("Health check: DB down: %s", exc)
             components["database"] = f"down: {exc}"
             overall_ok = False
+
+        # Worker check — the watchdog task should always be alive; if it is
+        # done() the worker crashed and the watchdog itself also exited.
+        try:
+            all_tasks = asyncio.all_tasks()
+            worker_alive = any(
+                t.get_name() == "print_queue_worker" and not t.done()
+                for t in all_tasks
+            )
+            components["print_worker"] = "up" if worker_alive else "down"
+            if not worker_alive:
+                overall_ok = False
+        except Exception as exc:
+            logger.warning("Health check: worker check failed: %s", exc)
+            components["print_worker"] = "unknown"
 
         http_status = 200 if overall_ok else 503
         return JSONResponse(

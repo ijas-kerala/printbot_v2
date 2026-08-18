@@ -61,8 +61,14 @@
     var canvas = document.getElementById('revenue-chart');
     if (!canvas || typeof Chart === 'undefined') { return; }
 
-    var labels  = revenueChartData.map(function (d) { return d.date; });
-    var values  = revenueChartData.map(function (d) { return d.revenue; });
+    var labels, values;
+    if (Array.isArray(revenueChartData)) {
+      labels = revenueChartData.map(function (d) { return d.date; });
+      values = revenueChartData.map(function (d) { return d.revenue; });
+    } else {
+      labels = revenueChartData.labels || [];
+      values = revenueChartData.data || [];
+    }
 
     new Chart(canvas, {
       type: 'bar',
@@ -231,6 +237,40 @@
             cancelBtn.textContent = 'Cancel';
           });
       }
+
+      var forceFailBtn = e.target.closest('.force-fail-btn');
+      if (forceFailBtn) {
+        var jobId3 = forceFailBtn.dataset.jobId;
+        if (!window.confirm(
+          'Force-fail this job?\n\n' +
+          'The job will be marked as FAILED and a compensation coupon will be issued for the user. ' +
+          'If the job is currently printing, the CUPS job will also be cancelled.\n\n' +
+          'This cannot be undone.'
+        )) { return; }
+
+        forceFailBtn.disabled = true;
+        forceFailBtn.textContent = '…';
+
+        fetch('/admin/api/job/' + encodeURIComponent(jobId3) + '/force-fail', { method: 'POST' })
+          .then(function (res) { return res.json().then(function (d) { return { ok: res.ok, data: d }; }); })
+          .then(function (r) {
+            if (r.ok) {
+              if (typeof showToast === 'function') { showToast('Job force-failed. Coupon issued.', 'info'); }
+              setTimeout(function () { window.location.reload(); }, 800);
+            } else {
+              forceFailBtn.disabled = false;
+              forceFailBtn.textContent = 'Force Fail';
+              if (typeof showToast === 'function') {
+                showToast(r.data.detail || 'Failed to force-fail job.', 'error');
+              }
+            }
+          })
+          .catch(function () {
+            forceFailBtn.disabled = false;
+            forceFailBtn.textContent = 'Force Fail';
+            if (typeof showToast === 'function') { showToast('Network error.', 'error'); }
+          });
+      }
     });
   }
 
@@ -244,6 +284,15 @@
     if (!ruleFormError) { return; }
     ruleFormError.textContent = msg;
     ruleFormError.style.display = msg ? '' : 'none';
+  }
+
+  function formatApiError(detail, fallback) {
+    if (!detail) { return fallback || 'Request failed.'; }
+    if (typeof detail === 'string') { return detail; }
+    if (Array.isArray(detail)) {
+      return detail.map(function (e) { return e.msg || String(e); }).join(' ');
+    }
+    return fallback || 'Request failed.';
   }
 
   if (addRuleBtn) {
@@ -265,7 +314,7 @@
       addRuleBtn.disabled = true;
       addRuleBtn.textContent = 'Adding…';
 
-      fetch('/admin/api/pricing', {
+      fetch('/admin/api/pricing-rule/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -284,7 +333,7 @@
             if (typeof showToast === 'function') { showToast('Pricing rule added.', 'success'); }
             setTimeout(function () { window.location.reload(); }, 500);
           } else {
-            setPricingError(r.data.detail || 'Failed to add rule.');
+            setPricingError(formatApiError(r.data.detail, 'Failed to add rule.'));
           }
         })
         .catch(function () {
@@ -325,14 +374,21 @@
 
       if (!window.confirm('Delete this pricing rule?')) { return; }
 
-      fetch('/admin/api/pricing/' + ruleId, { method: 'DELETE' })
-        .then(function (res) {
-          if (res.ok) {
+      fetch('/admin/api/pricing-rule/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rule_id: parseInt(ruleId, 10) }),
+      })
+        .then(function (res) { return res.json().then(function (d) { return { ok: res.ok, data: d }; }); })
+        .then(function (r) {
+          if (r.ok) {
             var row = pricingTbody.querySelector('tr[data-rule-id="' + ruleId + '"]');
             if (row) { row.remove(); }
             if (typeof showToast === 'function') { showToast('Rule deleted.', 'info'); }
           } else {
-            if (typeof showToast === 'function') { showToast('Failed to delete rule.', 'error'); }
+            if (typeof showToast === 'function') {
+              showToast((r.data && r.data.detail) ? r.data.detail : 'Failed to delete rule.', 'error');
+            }
           }
         })
         .catch(function () {

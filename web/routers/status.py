@@ -272,6 +272,13 @@ async def get_machine_status_data(db: AsyncSession) -> dict[str, Any]:
             # Job vanished or moved to terminal state since get_queue_status snapshot
             machine_state = "idle"
 
+    # 2b. Worker is between jobs: _current_job_id briefly becomes None in the
+    #     finally block before the next await self._queue.get() runs.  If the
+    #     queue still has waiting jobs, report "printing" to avoid a 1-2 second
+    #     "idle" flash on the kiosk screen between consecutive print jobs.
+    elif queue_length > 0:
+        machine_state = "printing"
+
     else:
         # No active queue entry — inspect recent jobs to show transient states
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(

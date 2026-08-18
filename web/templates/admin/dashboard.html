@@ -328,6 +328,13 @@
                 <button type="button" class="btn btn-sm btn-danger cancel-btn"
                         data-job-id="{{ job.id }}">Cancel</button>
                 {% endif %}
+                {% if job.status in ['paid', 'processing', 'printing'] %}
+                <button type="button" class="btn btn-sm btn-danger force-fail-btn"
+                        data-job-id="{{ job.id }}" style="margin-left:0.25rem;"
+                        title="Mark this stuck job as failed and issue a compensation coupon">
+                  Force Fail
+                </button>
+                {% endif %}
               </td>
             </tr>
             {% else %}

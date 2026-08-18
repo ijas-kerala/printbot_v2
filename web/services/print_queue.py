@@ -35,6 +35,7 @@ import asyncio
 import logging
 import secrets
 import string
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -67,6 +68,12 @@ _CUPS_COMPLETED_STATE: int = 9
 # Raised from 30 s to 60 s to reduce false "completed" signals.
 _CUPS_UNKNOWN_STATE_ASSUME_DONE_S: float = 60.0
 
+# If the printer stays in an error severity state (paper empty, jam, etc.)
+# for this many consecutive seconds, fast-fail the job rather than waiting
+# for the full 10-minute timeout.  Gives operators ~2 minutes to clear the
+# issue before the job is abandoned and a coupon is issued.
+_PRINTER_ERROR_FAST_FAIL_S: float = 120.0
+
 # Alphabet for coupon code generation (uppercase alpha + digits, no O/0/I/1 ambiguity)
 _COUPON_ALPHABET: str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _COUPON_CODE_LEN: int = 8
@@ -98,6 +105,9 @@ class PrintQueue:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._current_job_id: Optional[str] = None
+        # monotonic timestamp (time.monotonic()) set when the worker starts a job;
+        # used by estimate_wait_seconds() to account for how far along the active job is.
+        self._current_job_started_at: Optional[float] = None
         # Ordered list of job IDs waiting in the queue (excludes the current job)
         self._ordered_ids: list[str] = []
 
@@ -129,6 +139,7 @@ class PrintQueue:
         while True:
             job_id = await self._queue.get()
             self._current_job_id = job_id
+            self._current_job_started_at = time.monotonic()
             # Remove from ordered list now that it is actively processing
             try:
                 self._ordered_ids.remove(job_id)
@@ -143,6 +154,7 @@ class PrintQueue:
                 )
             finally:
                 self._current_job_id = None
+                self._current_job_started_at = None
                 self._queue.task_done()
 
     def get_queue_status(self) -> dict:
@@ -174,14 +186,22 @@ class PrintQueue:
         Return a rough wait-time estimate in seconds for the given queue position.
 
         Position 0 → currently printing, return 0.
-        Position N → N * _SECS_PER_JOB seconds.
+        Position N → remaining time on active job + (N-1) * _SECS_PER_JOB.
         None       → cannot estimate, return None.
+
+        Subtracts how long the active job has already been running so that a
+        user who joins a queue mid-job gets a more accurate first estimate.
         """
         if position is None:
             return None
         if position == 0:
             return 0
-        return position * self._SECS_PER_JOB
+        # Calculate remaining time on the job currently being processed
+        elapsed_on_current = 0
+        if self._current_job_started_at is not None:
+            elapsed_on_current = int(time.monotonic() - self._current_job_started_at)
+        remaining_on_current = max(0, self._SECS_PER_JOB - elapsed_on_current)
+        return remaining_on_current + (position - 1) * self._SECS_PER_JOB
 
     async def requeue_interrupted_jobs(self) -> None:
         """
@@ -375,7 +395,24 @@ class PrintQueue:
             # Preserve PRINTING status so the restart-recovery path in
             # process_job() can detect that CUPS was already submitted and
             # skip re-submission (preventing a double print).
-            if job.status != JobStatus.PRINTING:
+            #
+            # EDGE CASE: if status=PRINTING but cups_job_id=None the server
+            # crashed in the narrow window between CUPS submitting (returning
+            # an ID) and step 6 writing that ID to the DB.  We cannot resume
+            # polling without the CUPS job ID, so reset to PROCESSING and
+            # re-run the full pipeline.  A second physical print may occur if
+            # the orphaned CUPS job is still active, but there is no safer
+            # option without the ID.
+            if job.status == JobStatus.PRINTING and job.cups_job_id is None:
+                logger.warning(
+                    "_load_job: job %s is PRINTING with no cups_job_id "
+                    "(crash between CUPS submit and step-6 DB write) — "
+                    "resetting to PROCESSING for re-submission",
+                    job_id,
+                )
+                job.status = JobStatus.PROCESSING
+                await session.commit()
+            elif job.status != JobStatus.PRINTING:
                 job.status = JobStatus.PROCESSING
                 await session.commit()
 
@@ -527,6 +564,7 @@ class PrintQueue:
         elapsed = 0.0
         final_state: Optional[int] = None
         last_printer_note: Optional[str] = None   # tracks last DB-written printer note
+        printer_error_elapsed: float = 0.0        # consecutive seconds at severity "error"
 
         while elapsed < _CUPS_TIMEOUT_S:
             await asyncio.sleep(_CUPS_POLL_INTERVAL_S)
@@ -558,6 +596,30 @@ class PrintQueue:
             if note_to_write != last_printer_note:
                 await self._update_printer_note(job_id, note_to_write)
                 last_printer_note = note_to_write
+
+            # Fast-fail if the printer has been in a hard error state for too long.
+            # This prevents a paper-empty / paper-jam from holding the queue hostage
+            # for the full 10-minute timeout while all waiting jobs pile up.
+            # Reset the counter whenever the error clears so a brief blip doesn't
+            # prematurely fail a job (e.g. the operator is loading paper).
+            if printer_sev == "error":
+                printer_error_elapsed += _CUPS_POLL_INTERVAL_S
+                if printer_error_elapsed >= _PRINTER_ERROR_FAST_FAIL_S:
+                    reason = (
+                        f"Printer error for {int(printer_error_elapsed)}s "
+                        f"while printing: {printer_msg}"
+                    )
+                    logger.error(
+                        "process_job: %s (job %s, cups_job_id=%d) — fast-failing",
+                        reason, job_id, cups_job_id,
+                    )
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: cups_manager.cancel_job(cups_job_id)
+                    )
+                    await self._fail_job(job_id, reason, issue_coupon=True)
+                    return
+            else:
+                printer_error_elapsed = 0.0  # error cleared — reset grace period
 
             if state == _CUPS_COMPLETED_STATE:
                 final_state = state

@@ -27,9 +27,12 @@ import csv
 import hmac
 import io
 import logging
+import math
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
@@ -42,7 +45,7 @@ from sqlalchemy.orm import selectinload
 
 from core.config import settings
 from core.database import get_db
-from core.models import AdminSession, JobStatus, PricingRule, PrintJob
+from core.models import AdminSession, Coupon, JobStatus, PricingRule, PrintJob
 from core.printing.cups_manager import cups_manager
 from web.dependencies import require_admin, sign_admin_cookie
 from web.services.file_service import schedule_deletion
@@ -204,6 +207,25 @@ class ExportCSVBody(BaseModel):
                 raise ValueError
         except (ValueError, IndexError):
             raise ValueError("month must be in YYYY-MM format (e.g. 2026-03)")
+        return v
+
+
+class TogglePricingRuleBody(BaseModel):
+    is_active: bool
+
+
+class SavePrinterBody(BaseModel):
+    printer_name: str
+
+
+class CreateCouponBody(BaseModel):
+    amount: float
+
+    @field_validator("amount")
+    @classmethod
+    def amount_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("amount must be greater than 0")
         return v
 
 
@@ -403,11 +425,14 @@ async def dashboard(
         and any(os.path.exists(f.effective_pdf_path()) for f in job.files)
     }
 
-    # ── Pricing rules ──────────────────────────────────────────────────────────
+    # ── Pricing rules (all, including inactive — admin manages toggles) ───────
     pricing_result = await db.execute(
         select(PricingRule)
-        .where(PricingRule.is_active.is_(True))
-        .order_by(PricingRule.is_duplex.asc(), PricingRule.min_pages.asc())
+        .order_by(
+            PricingRule.is_active.desc(),
+            PricingRule.is_duplex.asc(),
+            PricingRule.min_pages.asc(),
+        )
     )
     pricing_rules = list(pricing_result.scalars().all())
 
@@ -619,6 +644,90 @@ async def api_job_cancel(
     return {"ok": True, "job_id": job_id}
 
 
+# ── API: Job force-fail ────────────────────────────────────────────────────────
+
+# Statuses that an admin can force-fail (job has been paid, may be stuck)
+_FORCE_FAILABLE_STATUSES: frozenset[JobStatus] = frozenset({
+    JobStatus.PAID,
+    JobStatus.PROCESSING,
+    JobStatus.PRINTING,
+})
+
+
+@router.post("/api/job/{job_id}/force-fail")
+async def api_job_force_fail(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> dict:
+    """
+    Force a stuck active job into FAILED state and issue a compensation coupon.
+
+    Intended for jobs that are stuck in PAID, PROCESSING, or PRINTING and
+    cannot be unstuck without a server restart.  If the job is in PRINTING
+    state and has a known CUPS job ID, we attempt to cancel it in CUPS so
+    it does not linger in the printer queue.
+
+    A compensation coupon is always issued (if the job has a cost > 0 and
+    no coupon has already been generated).
+    """
+    result = await db.execute(
+        select(PrintJob)
+        .options(selectinload(PrintJob.coupon))
+        .where(PrintJob.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status not in _FORCE_FAILABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Job cannot be force-failed in status '{job.status.value}'. "
+                "Only paid, processing, or printing jobs can be force-failed."
+            ),
+        )
+
+    # If the job is actively in CUPS, try to cancel it before marking failed
+    if job.status == JobStatus.PRINTING and job.cups_job_id:
+        cups_job_id = job.cups_job_id
+
+        def _cancel() -> bool:
+            return cups_manager.cancel_job(cups_job_id)
+
+        cancelled = await asyncio.get_event_loop().run_in_executor(None, _cancel)
+        if cancelled:
+            logger.info(
+                "Admin force-fail: cancelled CUPS job %d for job %s",
+                cups_job_id, job_id,
+            )
+        else:
+            logger.warning(
+                "Admin force-fail: CUPS cancel for job %d may have failed — "
+                "the job could still be in the printer queue",
+                cups_job_id,
+            )
+
+    reason = "Manually force-failed by admin"
+    job.status = JobStatus.FAILED
+    job.failed_reason = reason
+    job.printer_note = None
+
+    # Issue compensation coupon if not already present
+    if job.total_cost > 0 and job.coupon is None:
+        from web.services.print_queue import print_queue  # noqa: PLC0415
+        coupon = await print_queue._generate_coupon(db, job)
+        logger.info(
+            "Admin force-fail: issued coupon %r (₹%.2f) for job %s",
+            coupon.code, coupon.balance, job_id,
+        )
+
+    await db.commit()
+    logger.warning("Admin force-fail: job %s forced to FAILED by admin", job_id)
+    return {"ok": True, "job_id": job_id}
+
+
 # ── API: Pricing rule add ──────────────────────────────────────────────────────
 
 @router.post("/api/pricing-rule/add")
@@ -724,35 +833,113 @@ async def api_pricing_rule_delete(
     return {"ok": True}
 
 
-# ── API: Export CSV ────────────────────────────────────────────────────────────
-
-@router.post("/api/export-csv")
-async def api_export_csv(
-    body: ExportCSVBody,
+@router.post("/api/pricing/{rule_id}/toggle")
+async def api_pricing_rule_toggle(
+    rule_id: int,
+    body: TogglePricingRuleBody,
     db: AsyncSession = Depends(get_db),
     _: AdminSession = Depends(require_admin),
-) -> StreamingResponse:
-    """
-    Stream a monthly CSV export of all print jobs.
+) -> dict:
+    """Enable or disable a pricing rule without deleting it."""
+    result = await db.execute(
+        select(PricingRule).where(PricingRule.id == rule_id)
+    )
+    rule = result.scalar_one_or_none()
 
-    Uses a Python async generator to yield CSV rows without loading every job
-    row into memory at once, keeping peak memory usage flat regardless of
-    how many jobs are in the month.
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Pricing rule not found.")
+
+    rule.is_active = body.is_active
+    await db.commit()
+
+    logger.info(
+        "Admin pricing: rule #%d set active=%s",
+        rule_id, body.is_active,
+    )
+    return {"ok": True, "rule_id": rule_id, "is_active": body.is_active}
+
+
+@router.get("/api/pricing/test")
+async def api_pricing_test(
+    pages: int,
+    duplex: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> dict:
     """
+    Calculate price for a page count using active pricing rules.
+
+    Converts page count to physical sheets (duplex halves the sheet count)
+    and returns the matched rule plus total cost.
+    """
+    if pages < 1:
+        raise HTTPException(status_code=400, detail="pages must be at least 1")
+
+    sheets = math.ceil(pages / 2) if duplex else pages
+
+    rules_result = await db.execute(
+        select(PricingRule)
+        .where(
+            PricingRule.is_active.is_(True),
+            PricingRule.is_duplex == duplex,
+            PricingRule.min_pages <= sheets,
+        )
+        .order_by(PricingRule.min_pages.desc())
+    )
+    rules = list(rules_result.scalars().all())
+
+    rule = None
+    for candidate in rules:
+        if candidate.max_pages is None or candidate.max_pages >= sheets:
+            rule = candidate
+            break
+
+    if rule is None:
+        return {"rule": None, "sheets": sheets, "total": 0.0, "price_per_sheet": 0.0}
+
+    price_per_sheet = rule.price_per_page
+    total = round(sheets * price_per_sheet, 2)
+    return {
+        "rule": {
+            "id": rule.id,
+            "description": rule.description,
+            "min_pages": rule.min_pages,
+            "max_pages": rule.max_pages,
+            "is_duplex": rule.is_duplex,
+        },
+        "sheets": sheets,
+        "price_per_sheet": price_per_sheet,
+        "total": total,
+    }
+
+
+# ── API: Export CSV ────────────────────────────────────────────────────────────
+
+def _parse_export_month(month: str) -> tuple[datetime, datetime, str]:
+    """Return (month_start, month_end, month) for a YYYY-MM string."""
     try:
-        year_str, month_str = body.month.split("-")
+        year_str, month_str = month.split("-")
         year, month_int = int(year_str), int(month_str)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid month format.") from exc
+        if not (1 <= month_int <= 12) or year < 2020:
+            raise ValueError
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="month must be in YYYY-MM format (e.g. 2026-03)",
+        ) from exc
 
     month_start = datetime(year, month_int, 1, 0, 0, 0)
-    # First day of the next month (handles year rollover correctly)
     if month_int == 12:
         month_end = datetime(year + 1, 1, 1, 0, 0, 0)
     else:
         month_end = datetime(year, month_int + 1, 1, 0, 0, 0)
+    return month_start, month_end, month
 
-    # Load all jobs for the month with files eagerly loaded
+
+async def _stream_jobs_csv(db: AsyncSession, month: str) -> StreamingResponse:
+    """Build a streaming CSV response for all jobs in *month* (YYYY-MM)."""
+    month_start, month_end, month = _parse_export_month(month)
+
     result = await db.execute(
         select(PrintJob)
         .options(selectinload(PrintJob.files))
@@ -765,7 +952,6 @@ async def api_export_csv(
     jobs = list(result.scalars().all())
 
     async def _generate_csv():
-        """Yield CSV header then one row per job."""
         buf = io.StringIO()
         writer = csv.writer(buf)
 
@@ -802,11 +988,157 @@ async def api_export_csv(
             buf.seek(0)
             buf.truncate(0)
 
-    filename = f"printbot_jobs_{body.month}.csv"
-    logger.info("Admin export: CSV for %s requested (%d jobs)", body.month, len(jobs))
+    filename = f"printbot_jobs_{month}.csv"
+    logger.info("Admin export: CSV for %s requested (%d jobs)", month, len(jobs))
 
     return StreamingResponse(
         _generate_csv(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+@router.post("/api/export-csv")
+async def api_export_csv(
+    body: ExportCSVBody,
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> StreamingResponse:
+    """
+    Stream a monthly CSV export of all print jobs.
+
+    Uses a Python async generator to yield CSV rows without loading every job
+    row into memory at once, keeping peak memory usage flat regardless of
+    how many jobs are in the month.
+    """
+    return await _stream_jobs_csv(db, body.month)
+
+
+@router.get("/export/csv")
+async def export_csv_get(
+    month: str,
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> StreamingResponse:
+    """GET alias used by the dashboard download link."""
+    return await _stream_jobs_csv(db, month)
+
+
+# ── API: Settings ──────────────────────────────────────────────────────────────
+
+def _persist_env_var(key: str, value: str) -> None:
+    """Update or append *key*=*value* in the project .env file."""
+    env_path = Path(".env")
+    line = f"{key}={value}\n"
+    if env_path.exists():
+        text = env_path.read_text(encoding="utf-8")
+        pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+        if pattern.search(text):
+            text = pattern.sub(f"{key}={value}", text)
+        else:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text += line
+        env_path.write_text(text, encoding="utf-8")
+    else:
+        env_path.write_text(line, encoding="utf-8")
+
+
+@router.post("/api/settings/printer")
+async def api_save_printer(
+    body: SavePrinterBody,
+    _: AdminSession = Depends(require_admin),
+) -> dict:
+    """Update the default CUPS printer name (runtime + .env)."""
+    name = body.printer_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Printer name cannot be empty.")
+
+    settings.DEFAULT_PRINTER = name
+    try:
+        _persist_env_var("DEFAULT_PRINTER", name)
+    except OSError as exc:
+        logger.warning("Could not persist DEFAULT_PRINTER to .env: %s", exc)
+
+    logger.info("Admin settings: DEFAULT_PRINTER set to %r", name)
+    return {"ok": True, "printer_name": name}
+
+
+@router.post("/api/regen-qr")
+async def api_regen_qr(
+    _: AdminSession = Depends(require_admin),
+) -> dict:
+    """Regenerate the kiosk QR code from TUNNEL_URL."""
+    from web.routers.kiosk import generate_qr_code  # noqa: PLC0415
+
+    generate_qr_code()
+    logger.info("Admin settings: QR code regenerated")
+    return {"ok": True}
+
+
+# ── API: Coupons ───────────────────────────────────────────────────────────────
+
+_COUPON_ALPHABET: str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_COUPON_CODE_LEN: int = 8
+
+
+async def _create_coupon_code(db: AsyncSession) -> str:
+    """Generate a unique coupon code."""
+    for _ in range(5):
+        code = "".join(
+            secrets.choice(_COUPON_ALPHABET) for _ in range(_COUPON_CODE_LEN)
+        )
+        existing = await db.execute(
+            select(Coupon).where(Coupon.code == code)
+        )
+        if existing.scalar_one_or_none() is None:
+            return code
+    return secrets.token_hex(4).upper()
+
+
+@router.get("/api/coupons")
+async def api_list_coupons(
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> list[dict]:
+    """List all coupons for the admin dashboard."""
+    result = await db.execute(
+        select(Coupon).order_by(Coupon.created_at.desc()).limit(100)
+    )
+    coupons = result.scalars().all()
+    return [
+        {
+            "id": c.id,
+            "code": c.code,
+            "balance": c.balance,
+            "initial_amount": c.initial_amount,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "redeemed_at": c.redeemed_at.isoformat() if c.redeemed_at else None,
+        }
+        for c in coupons
+    ]
+
+
+@router.post("/api/coupons")
+async def api_create_coupon(
+    body: CreateCouponBody,
+    db: AsyncSession = Depends(get_db),
+    _: AdminSession = Depends(require_admin),
+) -> dict:
+    """Create a manual compensation coupon with a custom amount."""
+    code = await _create_coupon_code(db)
+    coupon = Coupon(
+        code=code,
+        balance=body.amount,
+        initial_amount=body.amount,
+        job_id=None,
+    )
+    db.add(coupon)
+    await db.commit()
+    await db.refresh(coupon)
+
+    logger.info("Admin coupon: created manual coupon %r (₹%.2f)", code, body.amount)
+    return {
+        "ok": True,
+        "code": coupon.code,
+        "balance": coupon.balance,
+    }
