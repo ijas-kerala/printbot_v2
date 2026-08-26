@@ -19,8 +19,10 @@ Routers included:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -68,6 +70,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── 4. Requeue interrupted jobs ────────────────────────────────────────────
     from web.services.print_queue import print_queue  # noqa: PLC0415
+    schema_before_requeue = await _inspect_db_schema()
+    _agent_debug_log(
+        "web/main.py:lifespan:before_requeue",
+        "schema state before requeue_interrupted_jobs",
+        schema_before_requeue,
+        "H3",
+    )
     await print_queue.requeue_interrupted_jobs()
 
     # ── 5. Start print queue worker (wrapped in watchdog) ─────────────────────
@@ -95,6 +104,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "79ec3e",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parent.parent / ".cursor" / "debug-79ec3e.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
+
+async def _inspect_db_schema() -> dict:
+    """Return alembic revision and print_jobs columns for debug diagnostics."""
+    schema: dict = {"alembic_version": None, "print_jobs_columns": [], "has_printer_note": False}
+    try:
+        async with AsyncSessionLocal() as session:
+            rev = await session.execute(text("SELECT version_num FROM alembic_version"))
+            schema["alembic_version"] = rev.scalar_one_or_none()
+            cols = await session.execute(text("PRAGMA table_info(print_jobs)"))
+            schema["print_jobs_columns"] = [row[1] for row in cols.fetchall()]
+            schema["has_printer_note"] = "printer_note" in schema["print_jobs_columns"]
+    except Exception as exc:
+        schema["error"] = str(exc)
+    return schema
+
+
 async def _run_migrations() -> None:
     """
     Shell out to `alembic upgrade head` to apply any pending migrations.
@@ -103,6 +148,13 @@ async def _run_migrations() -> None:
     Logs stdout/stderr at DEBUG/WARNING level respectively.
     Non-zero exit is logged as an error but does not abort startup.
     """
+    migration_files = sorted(Path("alembic/versions").glob("0*.py"))
+    _agent_debug_log(
+        "web/main.py:_run_migrations:entry",
+        "migration files on disk",
+        {"files": [f.name for f in migration_files], "count": len(migration_files)},
+        "H1",
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "alembic", "upgrade", "head",
@@ -126,8 +178,26 @@ async def _run_migrations() -> None:
                 "Alembic exited with code %d — the schema may be out of date",
                 proc.returncode,
             )
+
+        schema = await _inspect_db_schema()
+        _agent_debug_log(
+            "web/main.py:_run_migrations:exit",
+            "alembic finished",
+            {
+                "returncode": proc.returncode,
+                "stderr": stderr.decode().strip() if stderr else "",
+                **schema,
+            },
+            "H2",
+        )
     except Exception as exc:
         logger.error("Failed to run Alembic migrations: %s", exc, exc_info=True)
+        _agent_debug_log(
+            "web/main.py:_run_migrations:exception",
+            "alembic subprocess failed",
+            {"error": str(exc)},
+            "H4",
+        )
 
 
 async def _worker_watchdog(print_queue) -> None:  # type: ignore[type-arg]

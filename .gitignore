@@ -11,9 +11,9 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Alembic migrations (auto-generated; commit manually when ready)
+# Alembic migrations (auto-generated; commit numbered migrations when ready)
 alembic/versions/*.py
-!alembic/versions/0001_initial_schema.py
+!alembic/versions/0*.py
 
 # Virtual environments
 venv/
